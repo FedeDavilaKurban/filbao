@@ -1,0 +1,10 @@
+settings:
+  snapnum: 4 #
+  axis: 0 #
+  space: 'zspace' #
+  #snapdir: '/home/fdavilakurban/Proyectos/VPF_Quijote/data/quijote/Halos/FoF/' #
+  nbins_m: 30 #
+  nbins_s: 12 #
+  rmin: 3 #
+  rmax: 25 #
+

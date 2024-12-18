@@ -1,0 +1,7 @@
+
+Columnas del SDSS
+
+['plate', 'mjd', 'fiberID', 'objid', 'ra', 'dec', 'red', 'mag_ap_g',
+       'mag_ap_r', 'x', 'y', 'z', 'mag_abs_g', 'mag_abs_r', 'lum_g', 'lum_r',
+       'idfil', 'idseg', 'long_fil', 'long_seg', 'lum_r_fil', 'lum_r_seg',
+       'dist_fil']
