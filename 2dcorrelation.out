@@ -1,4 +1,4 @@
-## {'min_sep': 10.0, 'max_sep': 80.0, 'nbins': 10, 'bin_type': 'Linear', 'metric': 'Rperp', 'num_threads': 4, 'coords': '3d', 'corr': 'NN', 'tot': 80544523440.5}
+## {'min_sep': 10.0, 'max_sep': 80.0, 'nbins': 10, 'bin_type': 'Linear', 'num_threads': 4, 'metric': 'Rperp', 'coords': '3d', 'corr': 'NN', 'tot': 80544523440.5}
 #   r_nom       meanr       meanlogr        xi        sigma_xi        DD           RR         npairs   
   1.3500e+01   1.3752e+01   2.6109e+00  -7.2546e-02   8.3127e-05   3.0657e+08   3.3055e+08   3.0657e+08
   2.0500e+01   2.0673e+01   3.0244e+00  -6.8575e-02   6.8938e-05   4.4766e+08   4.8062e+08   4.4766e+08
