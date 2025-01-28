@@ -1,0 +1,10 @@
+Charla con Diego - Lunes 27/01
+
+Aumentar el min y max del corte en redshift.
+Las galaxias satélites y chicas borronean los features. Las galaxias cercanas tienen un ángulo grande en la escala de las BAO
+
+Suavizar matrix paresRR(mu,s)
+
+Calcular los pares RR aparte. Dárselo de comer al nbodykit en cálculos superiores para ahorrar tiempo.
+
+Hacer las pruebas con galaxias filamentarias. Son menos, ahorra tiempo y teóricamente las BAO van a estar más pronunciadas.
