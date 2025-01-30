@@ -8,3 +8,7 @@ Suavizar matrix paresRR(mu,s)
 Calcular los pares RR aparte. Dárselo de comer al nbodykit en cálculos superiores para ahorrar tiempo.
 
 Hacer las pruebas con galaxias filamentarias. Son menos, ahorra tiempo y teóricamente las BAO van a estar más pronunciadas.
+
+Chequear normalizacion del estimador que calcula el CorrFunc: https://corrfunc.readthedocs.io/en/master/_modules/Corrfunc/utils.html#convert_3d_counts_to_cf
+
+Modificar la funcion 'generate_random_catalogue' para especificar el tamaño de los randoms en funcion del tamaño de los datos
