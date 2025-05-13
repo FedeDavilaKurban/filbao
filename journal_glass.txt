@@ -1,0 +1,7 @@
+Metodo alternativo:
+-Agarrar un grid, rotarlo random y shiftearlo con un shift menor a la longitud del grid. 
+Hacer esto con dos samples y usar ambos en el estimador LS modificado
+
+-Ver el paper de los glass y usar el mismo tamaño de muestra y comparar con Fig. 1.
+
+- Leer el paper de glass para light-cones
