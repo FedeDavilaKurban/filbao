@@ -3,15 +3,37 @@ sample = 'nyu'
 h = 0.6774  # Hubble constant
 zmin, zmax = 0.07, 0.12  # Redshift range
 ran_method = 'random_choice' # Random redshift generation method ['random_choice', 'piecewise', 'poly']
-mag_max = -21  # Maximum magnitude
+mag_max = -22  # Maximum magnitude
 gr_min = 0.8
 deg = 4
 dist_min = 5.
 dist_max = 10.
 nside = 64  # Approx 55 arcmin resolution (adjust as needed)
-nrand_mult = 15 # Nr/Nd 
+nrand_mult = 1 # Nr/Nd 
 
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
+
+######################
+minsep = 0.1      # Min theta
+maxsep = 175.      # Max theta
+nbins = 30        # Bins in theta
+#nbootstrap = 0  # No. of bootstrap resampling
+brute = False     # Brute force for TreeCorr
+npatch = 100
+
+config = {"min_sep": minsep, \
+          "max_sep": maxsep, \
+            "nbins": nbins, \
+            #"sep_units": 'degree', \
+            "bin_type": 'Linear', \
+            "brute": brute, \
+            #"metric": 'Arc', \
+            "var_method": 'jackknife',\
+            "cross_patch_weight": 'match',\
+            #"num_bootstrap": nbootstrap,\
+            "npatch": npatch \
+            }
+######################
 
 def build_cdf_from_line(data, vmin, vmax, num_points=10000):
  
@@ -92,7 +114,7 @@ def generate_random_radec(ra,dec,nside,nrand):
     # Mark these pixels as valid
     mask[pixels] = 1
 
-    num_randoms = int(10e7)  # Number of random points
+    num_randoms = int(10e6)  # Number of random points
 
     # Generate uniform random RA, Dec
     ra_random = np.random.uniform(0, 360, num_randoms)  # RA: 0 to 360 degrees
@@ -111,6 +133,9 @@ def generate_random_radec(ra,dec,nside,nrand):
     ra_random = ra_random[valid_indices]
     dec_random = dec_random[valid_indices]
     
+    if ra_random[:nrand].shape[0]<nrand:
+        raise ValueError('Not enough random points generated. Increase num_randoms or adjust nside.')
+
     return ra_random[:nrand], dec_random[:nrand]
 
 def generate_random_red(redshift,nrand, ran_method, deg=5):
@@ -143,6 +168,12 @@ from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 from numpy.polynomial.polynomial import Polynomial
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+
+# ==========================================
+# READ DATA
+# ==========================================
 
 # Determine Sample
 if sample == 'nyu': datafile = '../data/sdss_dr72safe0_zmin_0.000_zmax_0.300_sigma_5.0.csv'
@@ -153,22 +184,28 @@ else: raise ValueError('Invalid sample')
 cat_sdss_full = pd.read_csv(datafile)
 cat_sdss_full['dist_fil'] /= h
 if gr_min !=0: cat_sdss_full = cat_sdss_full[cat_sdss_full['gr'] > gr_min]
-cat_sdss_z  = cat_sdss_full[(cat_sdss_full["red"] >= zmin)*(cat_sdss_full["red"] <= zmax)]
+cat_sdss_z  = cat_sdss_full[(cat_sdss_full["red"] >= zmin)*(cat_sdss_full["red"] <= zmax)] # Redshift cut
 if sample == 'nyu':
-    cat_sdss_z_mag = cat_sdss_z[cat_sdss_z['mag_abs_r'] < mag_max]
+    cat_sdss_z_mag = cat_sdss_z[cat_sdss_z['mag_abs_r'] < mag_max] # Magnitude cut
 else:
-    cat_sdss_z_mag = cat_sdss_z[cat_sdss_z['mag_abs_r']-5*np.log10(h) < mag_max]
+    cat_sdss_z_mag = cat_sdss_z[cat_sdss_z['mag_abs_r']-5*np.log10(h) < mag_max] # Magnitude cut
 
-plt.scatter(cat_sdss_full['red'], cat_sdss_full['mag_abs_r'],color='C00',s=1,alpha=.1)
+fig, ax = plt.subplots(figsize=(8, 6))
 
-plt.axvline(zmin, color='k', linestyle=':')
-plt.axvline(zmax, color='k', linestyle=':')
-plt.axhline(mag_max, color='k', linestyle=':')
+ax.hist2d(cat_sdss_full['red'], cat_sdss_full['mag_abs_r'], bins=50, cmap='Blues', norm=LogNorm())
 
-plt.xlabel('Redshift')
-plt.ylabel('-K')
-plt.savefig(f'redshift_magnitude_{name_modifier}.png', dpi=300, bbox_inches='tight')
-#plt.show()
+ax.axvline(zmin, color='k', linestyle=':')
+ax.axvline(zmax, color='k', linestyle=':')
+ax.axhline(mag_max, color='k', linestyle=':')
+
+ax.invert_yaxis()
+
+ax.set_xlabel('Redshift')
+ax.set_ylabel('K')
+filename = f'../plots/redshift_magnitude_{name_modifier}.png'
+print("Saving", filename)
+plt.savefig(filename, dpi=100, bbox_inches='tight')
+plt.close()
 
 print("Creating Random Catalogue...")
 
@@ -178,7 +215,7 @@ redshift = cat_sdss_z_mag['red'].values # Redshift
 
 nrand = nrand_mult * len(ra)
 
-ra_random, dec_random = generate_random_radec(ra,dec,nside,nrand)
+ra_random, dec_random = generate_random_radec(cat_sdss_z['ra'].values, cat_sdss_z['dec'].values, nside, nrand)
 red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg)
 #random_data.to_csv(f'../data/random_sample_healpy_{nside}_{len(random_data)}.csv', index=False)
 
@@ -192,46 +229,46 @@ random_data = pd.DataFrame({
 print('Data size: ',len(cat_sdss_z_mag))
 print('Random size: ',len(random_data))
 
-import matplotlib.pyplot as plt
+# ==========================================
+# PLOT GALAXIES
+# ==========================================
 
-# Create the figure and subplots
-fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharey=False)  
+# # Create the figure and subplots
+# fig, axes = plt.subplots(2, 2, figsize=(12, 9), sharey=False)  
 
-# Plot left
-axes[0,0].scatter(random_data['ra'],random_data['dec'],color='k',alpha=.2,s=3,label='Random')
-axes[0,0].scatter(cat_sdss_z_mag['ra'], cat_sdss_z_mag['dec'],color='C00',s=10,alpha=.7,label='SDSS')
+# # Plot left
+# axes[0,0].scatter(random_data['ra'],random_data['dec'],color='k',alpha=.2,s=3,label='Random')
+# axes[0,0].scatter(cat_sdss_z_mag['ra'], cat_sdss_z_mag['dec'],color='C00',s=10,alpha=.7,label='SDSS')
 
-# Plot for just randoms
-axes[1,0].scatter(random_data['ra'][:10000],random_data['dec'][:10000],color='k',alpha=1,s=.1,label='Random')
-
-
-# Plot right
-axes[0,1].hist(cat_sdss_z_mag['red'],bins=50, color='C00', density=True, histtype='stepfilled', label='SDSS')
-axes[0,1].hist(random_data['red'],bins=50, color='C01', density=True, histtype='stepfilled', alpha=0.7, label='Random')
-
-# Customize each subplot
-axes[0,0].set_title("Mask", fontsize=14)
-axes[0,0].set_xlabel("RA", fontsize=12)
-axes[0,0].set_ylabel("DEC", fontsize=12)
-axes[0,0].tick_params(axis='both', labelsize=10)
-
-axes[0,0].legend(loc=1)
-
-axes[0,1].set_title("Redshift distribution", fontsize=14)
-axes[0,1].set_xlabel("z", fontsize=12)
-axes[0,1].tick_params(axis='both', labelsize=10)
-
-axes[0,1].legend(loc=2)
-
-# Adjust layout for readability
-plt.tight_layout()
-
-# Save or show the figure
-plt.savefig(f'redshift_mask_{name_modifier}.png', dpi=300, bbox_inches='tight')
-#plt.show()
+# # Plot for just randoms
+# axes[1,0].scatter(random_data['ra'][:10000],random_data['dec'][:10000],color='k',alpha=1,s=.1,label='Random')
 
 
-import matplotlib.pyplot as plt
+# # Plot right
+# axes[0,1].hist(cat_sdss_z_mag['red'],bins=50, color='C00', density=True, histtype='stepfilled', label='SDSS')
+# axes[0,1].hist(random_data['red'],bins=50, color='C01', density=True, histtype='stepfilled', alpha=0.7, label='Random')
+
+# # Customize each subplot
+# axes[0,0].set_title("Mask", fontsize=14)
+# axes[0,0].set_xlabel("RA", fontsize=12)
+# axes[0,0].set_ylabel("DEC", fontsize=12)
+# axes[0,0].tick_params(axis='both', labelsize=10)
+
+# axes[0,0].legend(loc=1)
+
+# axes[0,1].set_title("Redshift distribution", fontsize=14)
+# axes[0,1].set_xlabel("z", fontsize=12)
+# axes[0,1].tick_params(axis='both', labelsize=10)
+
+# axes[0,1].legend(loc=2)
+
+# plt.tight_layout()
+
+# plt.savefig(f'redshift_mask_{name_modifier}.png', dpi=300, bbox_inches='tight')
+
+# ==========================================
+# FILAMENT AND NON-FILAMENT GALAXIES
+# ==========================================
 
 # Define filament and non-filament galaxies
 p25,p50,p75 = np.percentile(cat_sdss_z_mag['dist_fil'],[25,50,75])
@@ -257,14 +294,14 @@ random_nonfilgxs = pd.DataFrame({
 }
 )
 
-
+# ==========================================
+# PLOT GALAXIES W/ RANDOMS
+# ==========================================
 # Create the figure and subplots
 fig, axes = plt.subplots(3, 2, figsize=(12, 18), sharey=False) 
 
-# Plot left
+# Plot upper
 axes[0,0].scatter(filgxs['ra'],filgxs['dec'],color='C00',s=1,label='Filament galaxies')
-
-# Plot right
 axes[0,1].scatter(nonfilgxs['ra'],nonfilgxs['dec'],color='C00',s=1,label='Non-filament galaxies')
 
 # Plots Middle
@@ -293,6 +330,10 @@ axes[0,0].tick_params(axis='both', labelsize=10)
 axes[1,1].set_xlabel("RA", fontsize=12)
 axes[0,1].tick_params(axis='both', labelsize=10)
 
+
+axes[2,0].set_xlabel("Redshift", fontsize=12)
+axes[2,1].set_xlabel("Redshift", fontsize=12)
+
 axes[0,0].legend(loc=1)
 axes[0,1].legend(loc=1)
 axes[1,0].legend(loc=1)
@@ -300,16 +341,11 @@ axes[1,1].legend(loc=1)
 axes[2,0].legend(loc=2)
 axes[2,1].legend(loc=2)
 
-
-axes[2,0].set_xlabel("Redshift", fontsize=12)
-axes[2,1].set_xlabel("Redshift", fontsize=12)
-
-# Adjust layout for readability
-plt.tight_layout()
+#plt.tight_layout()
 
 # Save or show the figure
-plt.savefig(f'fil_nonfil_redshift_{name_modifier}.png', dpi=300, bbox_inches='tight')
-#plt.show()
+plt.savefig(f'../plots/data_{name_modifier}.png', dpi=300, bbox_inches='tight')
+plt.close()
 
 print('Filament galaxies: ',len(filgxs))
 print('Non-filament galaxies: ',len(nonfilgxs))
@@ -318,8 +354,10 @@ print('Data size: ',len(cat_sdss_z_mag))
 print('Random size for filament gxs: ',len(random_filgxs))
 print('Random size for non-filaments gxs: ',len(random_nonfilgxs))
 
-plt.hist(filgxs['dist_fil'],bins=50,color='C03',density=True)
-plt.hist(nonfilgxs['dist_fil'],bins=50,color='C00',density=True)
+fig, ax = plt.subplots(figsize=(8, 6))
+
+ax.hist(filgxs['dist_fil'],bins=50,color='C03',density=True)
+ax.hist(nonfilgxs['dist_fil'],bins=50,color='C00',density=True)
 
 p25,p50,p75 = np.percentile(cat_sdss_z_mag['dist_fil'],[25,50,75])
 
@@ -329,35 +367,14 @@ print(p33,p66)
 #plt.axvline(x=dist_min, color='r', linestyle='-')
 #plt.axvline(x=dist_max, color='r', linestyle='-')
 
-plt.axvline(x=p25, color='k', linestyle=':')
-plt.axvline(x=p50, color='k', linestyle=':')
-plt.axvline(x=p75, color='k', linestyle=':')
+ax.axvline(x=p25, color='k', linestyle=':')
+ax.axvline(x=p50, color='k', linestyle=':')
+ax.axvline(x=p75, color='k', linestyle=':')
 
-plt.xlabel('Distance to filament (Mpc/h)')
+ax.set_xlabel('Distance to filament (Mpc/h)')
 
-plt.savefig(f'distance_to_filament_{name_modifier}.png', dpi=300, bbox_inches='tight')
-#plt.show()
-
-######################
-minsep = 0.1      # Min theta
-maxsep = 175.      # Max theta
-nbins = 30        # Bins in theta
-#nbootstrap = 0  # No. of bootstrap resampling
-brute = False     # Brute force for TreeCorr
-npatch = 50
-
-config = {"min_sep": minsep, \
-          "max_sep": maxsep, \
-            "nbins": nbins, \
-            #"sep_units": 'degree', \
-            "bin_type": 'Linear', \
-            "brute": brute, \
-            #"metric": 'Arc', \
-            "var_method": 'jackknife', \
-            #"num_bootstrap": nbootstrap,\
-            "npatch": npatch \
-            }
-######################
+plt.savefig(f'../plots/dist_fil_hist_{name_modifier}.png', dpi=100, bbox_inches='tight')
+plt.close()
 
 import numpy as np
 import pandas as pd
@@ -414,14 +431,12 @@ def calculate_xi(data,randoms,config,sample=None):
 print('Calculating xi')
 xi, varxi, s = calculate_xi(cat_sdss_z_mag, random_data, config)
 
-
 print('Calculating xi_fil')
 xi_fil, varxi_fil, s_fil = calculate_xi(filgxs, random_filgxs, config)
 
-print('Calculating xi_nonfil')
-xi_nonfil, varxi_nonfil, s_nonfil = calculate_xi(nonfilgxs, random_nonfilgxs, config)
+#print('Calculating xi_nonfil')
+#xi_nonfil, varxi_nonfil, s_nonfil = calculate_xi(nonfilgxs, random_nonfilgxs, config)
 
-import matplotlib.pyplot as plt
 fslabel = 13
 capsize = 3
 
@@ -431,27 +446,29 @@ xi1 = data_luis['xi']
 
 sig = np.sqrt(varxi)
 
-plt.axvline(102,ls=':',c='k')
+fig, ax = plt.subplots(figsize=(8, 6)) 
 
-plt.errorbar(s, xi*s**2, yerr=sig*s**2, color='C00', lw=2, label='All Galaxies', capsize=capsize)
+ax.axvline(102,ls=':',c='k')
+
+ax.errorbar(s, xi*s**2, yerr=sig*s**2, color='C00', lw=2, label='All Galaxies', capsize=capsize)
 #plt.plot(s1, xi1*(s1)**2, color='C01', lw=2, label='Luis')
 
-sig_nonfil = np.sqrt(varxi_nonfil)
+#sig_nonfil = np.sqrt(varxi_nonfil)
 sig_fil = np.sqrt(varxi_fil)
 
-plt.errorbar(s_nonfil, xi_nonfil*s_nonfil**2, yerr=sig_nonfil*s_nonfil**2, color='C02', lw=2, label='Non-filament Galaxies', ls=':', capsize=capsize)
-plt.errorbar(s_fil, xi_fil*s_fil**2, yerr=sig_fil*s_fil**2, color='C03', lw=2, label='Filament Galaxies', ls='--', capsize=capsize)
+#plt.errorbar(s_nonfil, xi_nonfil*s_nonfil**2, yerr=sig_nonfil*s_nonfil**2, color='C02', lw=2, label='Non-filament Galaxies', ls=':', capsize=capsize)
+ax.errorbar(s_fil, xi_fil*s_fil**2, yerr=sig_fil*s_fil**2, color='C03', lw=2, label='Filament Galaxies', ls='--', capsize=capsize)
 
-plt.xlabel(r'$s$', fontsize = fslabel)
-plt.ylabel(r'$s²\xi(s)$', fontsize = fslabel)
-
-plt.legend()
-
-plt.tight_layout()
+ax.set_xlabel(r'$s$', fontsize = fslabel)
+ax.set_ylabel(r'$s²\xi(s)$', fontsize = fslabel)
 
 #plt.show()
 
-print(s)
+#print(s)
+
+
+plt.tight_layout()
 
 plotname = f'../plots/xi_s_mag{mag_max}_z{zmin}-{zmax}_distfil{dist_min}-{dist_max}_color{gr_min}.png'
+print("Saving", plotname)
 plt.savefig(plotname, dpi=300, bbox_inches='tight')
