@@ -18,23 +18,24 @@ from astropy.cosmology import FlatLambdaCDM
 # ---------------------------
 sample = 'nyu'
 h = 0.6774  # Hubble constant
-zmin, zmax = 0.07, 0.12  # Redshift range
-ran_method = 'poly'  # ['random_choice', 'piecewise', 'poly']
-mag_max = -20  # Maximum magnitude
+#zmin, zmax = 0.07, 0.12  # Redshift range
+zmin, zmax = 0.07, 0.2  # Redshift range
+ran_method = 'random_choice'  # ['random_choice', 'piecewise', 'poly']
+mag_max = -21.2  # Maximum magnitude
 gr_min = 0.8
 deg = 4
 dist_min = 5.0
 dist_max = 10.0
-nside = 64  # Healpix nside
+nside = 256  # Healpix nside
 nrand_mult = 10  # Nr/Nd
 
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
 
-minsep = 0.1
-maxsep = 175.0
+minsep = 10.
+maxsep = 150.0
 nbins = 30
 brute = False
-npatch = 50
+npatch = 80
 
 config = {
     "min_sep": minsep,
@@ -442,6 +443,12 @@ def plot_xi(xi, varxi, s, xi_fil, varxi_fil, s_fil, xi_nonfil=None, varxi_nonfil
 
     ax.legend()
 
+    # optional reference data from file
+    data_luis = pd.read_csv('../data/test.out')
+    s1 = data_luis['s']
+    xi1 = data_luis['xi']
+    ax.plot(s1, xi1 * s1 ** 2, color='k', lw=1, ls='--', label='Luis')
+
     plt.tight_layout()
     if plotname:
         print("Saving", plotname)
@@ -476,10 +483,9 @@ def main():
     print("Calculating xi_nonfil")
     xi_nonfil, varxi_nonfil, s_nonfil = calculate_xi(nonfilgxs, random_nonfilgxs, config, sample_name=sample)
 
-    # optional reference data from file (kept as in original)
-    data_luis = pd.read_csv("../data/test.out")
-    s1 = data_luis["s"]
-    xi1 = data_luis["xi"]
+    # Uncomment when skipping filament/non-filament calculation
+    # xi_fil, varxi_fil, s_fil = xi, varxi, s
+    # xi_nonfil, varxi_nonfil, s_nonfil = xi, varxi, s
 
     plotname = f"../plots/xi_{name_modifier}.png"
     plot_xi(xi, varxi, s, xi_fil, varxi_fil, s_fil, xi_nonfil, varxi_nonfil, s_nonfil, plotname)
