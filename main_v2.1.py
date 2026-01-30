@@ -1,6 +1,5 @@
 import os
 from typing import Tuple
-
 import numpy as np
 import pandas as pd
 import healpy as hp
@@ -247,6 +246,92 @@ def save_figure(fig, path: str, dpi: int = 300):
 
 
 # ---------------------------
+# FILE CHECKING FUNCTIONS
+# ---------------------------
+
+def check_autocorr_files_exist(sample_name: str, suffix: str = "") -> bool:
+    """Check if autocorrelation files exist for a given sample."""
+    if suffix:
+        suffix = f"_{suffix}"
+    
+    if sample_name is not None:
+        dd_file = f"../data/dd_{sample_name}{suffix}.txt"
+        rr_file = f"../data/rr_{sample_name}{suffix}.txt"
+        dr_file = f"../data/dr_{sample_name}{suffix}.txt"
+    else:
+        dd_file = f"../data/dd{suffix}.txt"
+        rr_file = f"../data/rr{suffix}.txt"
+        dr_file = f"../data/dr{suffix}.txt"
+    
+    return all(os.path.exists(f) for f in [dd_file, rr_file, dr_file])
+
+
+def check_crosscorr_files_exist(sample_name: str) -> bool:
+    """Check if cross-correlation files exist for a given sample."""
+    if sample_name is not None:
+        dd_file = f"../data/dd_cross_{sample_name}.txt"
+        rr_file = f"../data/rr_cross_{sample_name}.txt"
+        dr_file = f"../data/dr_cross_{sample_name}.txt"
+        rd_file = f"../data/rd_cross_{sample_name}.txt"
+    else:
+        dd_file = "../data/dd_cross.txt"
+        rr_file = "../data/rr_cross.txt"
+        dr_file = "../data/dr_cross.txt"
+        rd_file = "../data/rd_cross.txt"
+    
+    return all(os.path.exists(f) for f in [dd_file, rr_file, dr_file, rd_file])
+
+
+def read_correlation_results(file_prefix: str, sample_name: str = None, cross: bool = False):
+    """
+    Read correlation results from existing files.
+    Returns xi, varxi, meanr
+    """
+    if cross:
+        if sample_name is not None:
+            rr = treecorr.NNCorrelation(config)
+            rr.read(f"../data/rr_cross_{sample_name}.txt")
+            dd = treecorr.NNCorrelation(config)
+            dd.read(f"../data/dd_cross_{sample_name}.txt")
+            dr = treecorr.NNCorrelation(config)
+            dr.read(f"../data/dr_cross_{sample_name}.txt")
+            rd = treecorr.NNCorrelation(config)
+            rd.read(f"../data/rd_cross_{sample_name}.txt")
+        else:
+            rr = treecorr.NNCorrelation(config)
+            rr.read("../data/rr_cross.txt")
+            dd = treecorr.NNCorrelation(config)
+            dd.read("../data/dd_cross.txt")
+            dr = treecorr.NNCorrelation(config)
+            dr.read("../data/dr_cross.txt")
+            rd = treecorr.NNCorrelation(config)
+            rd.read("../data/rd_cross.txt")
+        
+        xi, varxi = dd.calculateXi(rr=rr, dr=dr, rd=rd)
+        meanr = dd.meanr
+    else:
+        if sample_name is not None:
+            rr = treecorr.NNCorrelation(config)
+            rr.read(f"../data/rr_{sample_name}.txt")
+            dd = treecorr.NNCorrelation(config)
+            dd.read(f"../data/dd_{sample_name}.txt")
+            dr = treecorr.NNCorrelation(config)
+            dr.read(f"../data/dr_{sample_name}.txt")
+        else:
+            rr = treecorr.NNCorrelation(config)
+            rr.read("../data/rr.txt")
+            dd = treecorr.NNCorrelation(config)
+            dd.read("../data/dd.txt")
+            dr = treecorr.NNCorrelation(config)
+            dr.read("../data/dr.txt")
+        
+        xi, varxi = dd.calculateXi(rr=rr, dr=dr)
+        meanr = dd.meanr
+    
+    return xi, varxi, meanr
+
+
+# ---------------------------
 # MAIN PROCEDURE
 # ---------------------------
 
@@ -394,11 +479,22 @@ def H(ra, dec, z, h_val):
     return x, y, zc
 
 
-def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample_name: str = None):
+def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample_name: str = None, suffix: str = ""):
     """
     Compute xi(s) using TreeCorr NNCorrelation (preserved logic).
     Note: this preserves the original file-writing logic (including the possibly inverted sample check).
     """
+    # Check if files already exist
+    if suffix:
+        suffix = f"_{suffix}"
+    
+    if check_autocorr_files_exist(sample_name, suffix):
+        print(f"Found existing autocorrelation files for {sample_name}{suffix}, reading from disk...")
+        xi, varxi, meanr = read_correlation_results("autocorr", sample_name, cross=False)
+        return xi, varxi, meanr
+    
+    print(f"Computing autocorrelation for {sample_name}{suffix}...")
+    
     randoms["x"], randoms["y"], randoms["z"] = H(randoms["ra"], randoms["dec"], randoms["red"], h)
     data.loc[:, "x"], data.loc[:, "y"], data.loc[:, "z"] = H(data["ra"], data["dec"], data["red"], h)
 
@@ -417,20 +513,29 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample
 
     # Preserve original file naming behavior (kept intentionally identical to input script)
     if sample_name is not None:
-        rr.write("../data/rr.txt")
-        dd.write("../data/dd.txt")
-        dr.write("../data/dr.txt")
+        rr.write(f"../data/rr_{sample_name}{suffix}.txt")
+        dd.write(f"../data/dd_{sample_name}{suffix}.txt")
+        dr.write(f"../data/dr_{sample_name}{suffix}.txt")
     else:
-        rr.write(f"../data/rr_{sample_name}.txt")
-        dd.write(f"../data/dd_{sample_name}.txt")
-        dr.write(f"../data/dr_{sample_name}.txt")
+        rr.write(f"../data/rr{suffix}.txt")
+        dd.write(f"../data/dd{suffix}.txt")
+        dr.write(f"../data/dr{suffix}.txt")
     return xi, varxi, dd.meanr
+
 
 def calculate_crossxi(data1: pd.DataFrame, data2: pd.DataFrame, randoms1: pd.DataFrame, randoms2: pd.DataFrame, config: dict, sample_name: str = None):
     """
     Compute cross xi(s) using TreeCorr NNCorrelation (preserved logic).
     Note: this preserves the original file-writing logic (including the possibly inverted sample check).
     """
+    # Check if files already exist
+    if check_crosscorr_files_exist(sample_name):
+        print(f"Found existing cross-correlation files for {sample_name}, reading from disk...")
+        xi, varxi, meanr = read_correlation_results("cross", sample_name, cross=True)
+        return xi, varxi, meanr
+    
+    print(f"Computing cross-correlation for {sample_name}...")
+    
     randoms1["x"], randoms1["y"], randoms1["z"] = H(randoms1["ra"], randoms1["dec"], randoms1["red"], h)
     data1.loc[:, "x"], data1.loc[:, "y"], data1.loc[:, "z"] = H(data1["ra"], data1["dec"], data1["red"], h)
 
@@ -456,15 +561,15 @@ def calculate_crossxi(data1: pd.DataFrame, data2: pd.DataFrame, randoms1: pd.Dat
 
     # Preserve original file naming behavior (kept intentionally identical to input script)
     if sample_name is not None:
-        rr.write("../data/rr_cross.txt")
-        dd.write("../data/dd_cross.txt")
-        dr.write("../data/dr_cross.txt")
-        rd.write("../data/rd_cross.txt")
-    else:
         rr.write(f"../data/rr_cross_{sample_name}.txt")
         dd.write(f"../data/dd_cross_{sample_name}.txt")
         dr.write(f"../data/dr_cross_{sample_name}.txt")
         rd.write(f"../data/rd_cross_{sample_name}.txt")
+    else:
+        rr.write("../data/rr_cross.txt")
+        dd.write("../data/dd_cross.txt")
+        dr.write("../data/dr_cross.txt")
+        rd.write("../data/rd_cross.txt")
     return xi, varxi, dd.meanr
 
 
@@ -498,7 +603,7 @@ def plot_xi(xi, varxi, s, xi_fil, varxi_fil, s_fil, \
     ax.plot(s1, xi1 * s1 ** 2, color='k', lw=1, ls='--', label='Luis')
 
     # optional check
-    if filgxs is None or nonfilgxs is None or cat_z_mag is None:
+    if filgxs is not None and nonfilgxs is not None and cat_z_mag is not None:
         fF = len(filgxs) / len(cat_z_mag)
         fN = len(nonfilgxs) / len(cat_z_mag)
 
@@ -540,13 +645,13 @@ def main():
     print("Non-filament galaxies:", len(nonfilgxs))
 
     print("Calculating xi")
-    xi, varxi, s = calculate_xi(cat_z_mag, random_data, config, sample_name=sample)
+    xi, varxi, s = calculate_xi(cat_z_mag, random_data, config, sample_name=sample, suffix="full")
 
     print("Calculating xi_fil")
-    xi_fil, varxi_fil, s_fil = calculate_xi(filgxs, random_filgxs, config, sample_name=sample)
+    xi_fil, varxi_fil, s_fil = calculate_xi(filgxs, random_filgxs, config, sample_name=sample, suffix="fil")
 
     print("Calculating xi_nonfil")
-    xi_nonfil, varxi_nonfil, s_nonfil = calculate_xi(nonfilgxs, random_nonfilgxs, config, sample_name=sample)
+    xi_nonfil, varxi_nonfil, s_nonfil = calculate_xi(nonfilgxs, random_nonfilgxs, config, sample_name=sample, suffix="nonfil")
 
     print("Calculating cross_xi")
     random_all = random_data.copy()     # One master random catalog
