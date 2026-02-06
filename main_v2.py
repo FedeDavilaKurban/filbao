@@ -30,7 +30,7 @@ deg = 4
 #dist_min = 5.0
 #dist_max = 10.0
 nside = 256  # Healpix nside
-nrand_mult = 10  # Nr/Nd
+nrand_mult = 3  # Nr/Nd
 
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
 
@@ -169,7 +169,7 @@ def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, nrand: in
     mask[pixels] = 1
 
     # number of uniform trial points (original code used int(10e6))
-    num_randoms = int(10e5)
+    num_randoms = nrand
 
     # Iterate until we have enough valid random points
     ra_random = np.random.uniform(0.0, 360.0, num_randoms)
@@ -277,16 +277,25 @@ def select_sample(cat: pd.DataFrame) -> pd.DataFrame:
     return cat_z, cat_z_mag
 
 
-def compute_and_save_random_catalog(cat_z_mag: pd.DataFrame, cat_z: pd.DataFrame) -> pd.DataFrame:
+def compute_and_save_random_catalog(cat_full: pd.DataFrame, cat_z: pd.DataFrame) -> pd.DataFrame:
+    print('Computing random catalog with method:', ran_method)
     """Create random RA/Dec and redshift matching the mask and redshift distribution."""
-    ra = cat_z_mag["ra"].values
-    dec = cat_z_mag["dec"].values
-    redshift = cat_z_mag["red"].values
+    ra = cat_full["ra"].values
+    dec = cat_full["dec"].values
+    redshift = cat_z["red"].values
 
     nrand = int(nrand_mult * len(ra))
-
-    ra_random, dec_random = generate_random_radec(cat_z["ra"].values, cat_z["dec"].values, nside, nrand)
+    print(nrand)
+    #ra_random, dec_random = generate_random_radec(cat_full["ra"].values, cat_full["dec"].values, nside, nrand)
+    # Read Random RA/Dec from file (pre-generated for speed)
+    random_radec_file = f"../data/random_sample_healpy_128.csv"
+    random_radec = pd.read_csv(random_radec_file)
+    ra_random = random_radec["ra"].values[:nrand]
+    dec_random = random_radec["dec"].values[:nrand]
     red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg)
+
+    print("Random RA/Dec generated:", len(ra_random))
+    print("Random Redshifts generated:", len(red_random))
 
     random_data = pd.DataFrame({"ra": ra_random, "dec": dec_random, "red": red_random})
     return random_data
@@ -528,7 +537,7 @@ def main():
     plot_redshift_k(cat_full, cat_z_mag, None)
 
     print("Creating Random Catalogue...")
-    random_data = compute_and_save_random_catalog(cat_z_mag, cat_z)
+    random_data = compute_and_save_random_catalog(cat_full, cat_z_mag)
     print("Data size: ", len(cat_z_mag))
     print("Random size: ", len(random_data))
 
