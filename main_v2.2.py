@@ -1,3 +1,13 @@
+"""
+v2.2
+
+Compute random RA and Dec for each bin (instead of using a master RA and Dec)
+
+v2.1
+
+Computes correlations for bins in dist_fil (instead of just filament vs non-filament).
+"""
+
 import os
 from typing import Tuple
 
@@ -20,17 +30,18 @@ sample = 'nyu'
 h = 0.6774  # Hubble constant
 #zmin, zmax = 0.07, 0.12  # Redshift range
 zmin, zmax = 0.07, 0.2  # Redshift range
-ran_method = 'random_choice'  # ['random_choice', 'piecewise', 'poly']
+ran_method = 'poly'  # ['random_choice', 'piecewise', 'poly']
+if ran_method == 'poly':
+    deg = 5  # degree of polynomial for redshift distribution fit 
 if zmax == 0.12: 
     mag_max = -20.0  # Maximum magnitude
 elif zmax == 0.2:
     mag_max = -21.2  # Maximum magnitude
 gr_min = 0.8
-deg = 4
 #dist_min = 5.0
 #dist_max = 10.0
 nside = 256  # Healpix nside
-nrand_mult = 5  # Nr/Nd
+nrand_mult = 10  # Nr/Nd
 
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
 
@@ -65,7 +76,7 @@ def safe_trapz(y: np.ndarray, x: np.ndarray) -> float:
     """Integrate y over x using np.trapz; fallback to np.trapezoid if necessary."""
     # np.trapz exists in NumPy; keep this wrapper to be defensive
     try:
-        return np.trapz(y, x)
+        return np.trapezoid(y, x)
     except AttributeError:
         # older numpy alternate name
         return np.trapezoid(y, x)
@@ -123,7 +134,7 @@ def build_cdf_from_line(
 
 
 def build_cdf_from_parabola(
-    data: np.ndarray, vmin: float, vmax: float, deg: int = 2, num_points: int = 10000
+    data: np.ndarray, vmin: float, vmax: float, deg: int, num_points: int = 10000
 ) -> Tuple[interp1d, np.ndarray, np.ndarray, np.ndarray]:
     """
     Fit a polynomial to the histogram (using numpy.polynomial.Polynomial.fit).
@@ -209,7 +220,7 @@ def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, nrand: in
     return ra_random[:nrand], dec_random[:nrand]
 
 
-def generate_random_red(redshift: np.ndarray, nrand: int, ran_method: str, deg: int = 5) -> np.ndarray:
+def generate_random_red(redshift: np.ndarray, nrand: int, ran_method: str, deg: int) -> np.ndarray:
     """
     Generate random redshifts following the chosen method.
     Methods preserved: 'poly', 'piecewise', 'random_choice'.
@@ -277,35 +288,36 @@ def select_sample(cat: pd.DataFrame) -> pd.DataFrame:
     return cat_z, cat_z_mag
 
 
-def compute_and_save_random_catalog(cat_full: pd.DataFrame, cat_z: pd.DataFrame, nside: int) -> pd.DataFrame:
+def generate_random_catalog(cat: pd.DataFrame, nside: int, nrand_mult: int, fullcat: pd.DataFrame = None) -> pd.DataFrame:
     print('Computing random catalog with method:', ran_method)
     """Create random RA/Dec and redshift matching the mask and redshift distribution."""
-    ra = cat_full["ra"].values
-    dec = cat_full["dec"].values
-    redshift = cat_z["red"].values
+    ra = cat["ra"].values
+    dec = cat["dec"].values
+    redshift = cat["red"].values
 
     nrand = int(nrand_mult * len(redshift))
-    print(nrand)
-    ra_random, dec_random = generate_random_radec(ra, dec, nside, nrand)
-    # Read Random RA/Dec from file (pre-generated for speed)
-    #random_radec_file = f"../data/random_sample_healpy_{nside}.csv"
-    #print("Reading random RA/Dec from file:", random_radec_file)
-    #random_radec = pd.read_csv(random_radec_file)
-    #ra_random = random_radec["ra"].values[:nrand]
-    #dec_random = random_radec["dec"].values[:nrand]
+
+    if fullcat is None:
+        ra_random, dec_random = generate_random_radec(ra, dec, nside, nrand)
+    else: 
+        print("Using full catalog for RA/Dec mask")
+        ra_random, dec_random = generate_random_radec(fullcat["ra"].values, fullcat["dec"].values, nside, nrand)
+        ra_random = ra_random[:nrand*len(ra)]
+        dec_random = dec_random[:nrand*len(ra)]
+
     red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg)
 
-    print("Random RA/Dec generated:", len(ra_random))
-    print("Random Redshifts generated:", len(red_random))
+    print("Data size:", len(cat))
+    print("Random size:", len(ra_random))
 
     random_data = pd.DataFrame({"ra": ra_random, "dec": dec_random, "red": red_random})
     return random_data
 
 
-def plot_redshift_k(cat_full: pd.DataFrame, cat_z_mag: pd.DataFrame, random_data: pd.DataFrame) -> None:
+def plot_redshift_k(cat: pd.DataFrame) -> None:
     """Recreate the redshift-magnitude 2D histogram (preserved plotting behavior)."""
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.hist2d(cat_full["red"], cat_full["mag_abs_r"], bins=50, cmap="Blues", norm=LogNorm())
+    ax.hist2d(cat["red"], cat["mag_abs_r"], bins=50, cmap="Blues", norm=LogNorm())
     ax.axvline(zmin, color="k", linestyle=":")
     ax.axvline(zmax, color="k", linestyle=":")
     ax.axhline(mag_max, color="k", linestyle=":")
@@ -317,85 +329,6 @@ def plot_redshift_k(cat_full: pd.DataFrame, cat_z_mag: pd.DataFrame, random_data
     filename = f"../plots/redshift_magnitude_{name_modifier}.png"
     print("Saving", filename)
     save_figure(fig, filename, dpi=100)
-
-
-def split_filaments_and_randoms(cat_z_mag: pd.DataFrame, random_data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split filament vs non-filament galaxies and make corresponding random catalogs."""
-    p25, p50, p75 = np.percentile(cat_z_mag["dist_fil"], [25, 50, 75])
-    p33, p66 = np.percentile(cat_z_mag["dist_fil"], [33, 66])
-
-    filgxs = cat_z_mag[cat_z_mag["dist_fil"] <= p33]
-    nonfilgxs = cat_z_mag[(cat_z_mag["dist_fil"] > p33) & (cat_z_mag["dist_fil"] <= p66)]
-
-    # Check if filgxs and nonfilgxs have the same size and adjust if necessary 
-    if len(filgxs) > len(nonfilgxs):
-        filgxs = filgxs.sample(len(nonfilgxs), random_state=42)
-    elif len(nonfilgxs) > len(filgxs):
-        nonfilgxs = nonfilgxs.sample(len(filgxs), random_state=42)
-    
-
-    nrand = len(random_data)
-    random_filgxs_red = generate_random_red(filgxs["red"].values, nrand, ran_method=ran_method, deg=deg)
-    random_filgxs = pd.DataFrame({"ra": random_data["ra"], "dec": random_data["dec"], "red": random_filgxs_red})
-
-    random_nonfilgxs_red = generate_random_red(nonfilgxs["red"].values, nrand, ran_method=ran_method, deg=deg)
-    random_nonfilgxs = pd.DataFrame({"ra": random_data["ra"], "dec": random_data["dec"], "red": random_nonfilgxs_red})
-
-    return filgxs, nonfilgxs, random_filgxs, random_nonfilgxs
-
-
-def plot_data_and_randoms(filgxs, nonfilgxs, random_filgxs, random_nonfilgxs) -> None:
-    fig, axes = plt.subplots(3, 2, figsize=(12, 18), sharey=False)
-
-    axes[0, 0].scatter(filgxs["ra"], filgxs["dec"], color="C00", s=1, label="Filament galaxies")
-    axes[0, 1].scatter(nonfilgxs["ra"], nonfilgxs["dec"], color="C00", s=1, label="Non-filament galaxies")
-
-    axes[1, 0].scatter(random_filgxs["ra"], random_filgxs["dec"], color="k", alpha=0.2, s=1.5, label="Random")
-    axes[1, 1].scatter(random_nonfilgxs["ra"], random_nonfilgxs["dec"], color="k", alpha=0.2, s=1.5, label="Random")
-
-    axes[1, 0].scatter(filgxs["ra"], filgxs["dec"], color="C00", s=1, label="Filament galaxies")
-    axes[1, 1].scatter(nonfilgxs["ra"], nonfilgxs["dec"], color="C00", s=1, label="Non-filament galaxies")
-
-    axes[2, 0].hist(filgxs["red"], bins=50, color="C00", density=True, histtype="stepfilled", label="Filament galaxies")
-    axes[2, 0].hist(random_filgxs["red"], bins=50, color="C01", density=True, histtype="stepfilled", alpha=0.7, label="Random")
-
-    axes[2, 1].hist(nonfilgxs["red"], bins=50, color="C00", density=True, histtype="stepfilled", label="Non-filament galaxies")
-    axes[2, 1].hist(random_nonfilgxs["red"], bins=50, color="C01", density=True, histtype="stepfilled", alpha=0.7, label="Random")
-
-    axes[1, 0].set_xlabel("RA", fontsize=12)
-    axes[0, 0].set_ylabel("DEC", fontsize=12)
-    axes[1, 0].set_ylabel("DEC", fontsize=12)
-    axes[2, 0].set_xlabel("Redshift", fontsize=12)
-    axes[2, 1].set_xlabel("Redshift", fontsize=12)
-
-    axes[0, 0].legend(loc=1)
-    axes[0, 1].legend(loc=1)
-    axes[1, 0].legend(loc=1)
-    axes[1, 1].legend(loc=1)
-    axes[2, 0].legend(loc=2)
-    axes[2, 1].legend(loc=2)
-
-    filename = f"../plots/data_{name_modifier}.png"
-    save_figure(fig, filename, dpi=300)
-
-
-def plot_dist_fil(cat_z_mag: pd.DataFrame) -> None:
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.hist(cat_z_mag["dist_fil"], bins=50, color="C03", density=True)
-    ax.hist(cat_z_mag["dist_fil"], bins=50, color="C00", density=True)
-
-    p25, p50, p75 = np.percentile(cat_z_mag["dist_fil"], [25, 50, 75])
-    p33, p66 = np.percentile(cat_z_mag["dist_fil"], [33, 66])
-
-    ax.axvline(x=p25, color="k", linestyle=":")
-    ax.axvline(x=p50, color="k", linestyle=":")
-    ax.axvline(x=p75, color="k", linestyle=":")
-
-    ax.set_xlabel("Distance to filament (Mpc/h)")
-    filename = f"../plots/dist_fil_hist_{name_modifier}.png"
-    save_figure(fig, filename, dpi=100)
-    print("percentiles p25,p50,p75:", p25, p50, p75)
-    print("percentiles p33,p66:", p33, p66)
 
 
 def H(ra, dec, z, h_val):
@@ -540,53 +473,242 @@ def plot_xi(xi, varxi, s, xi_fil, varxi_fil, s_fil, \
         print("Saving", plotname)
         save_figure(fig, plotname, dpi=300)
 
+def split_by_dist_fil_bins(cat_z_mag: pd.DataFrame):
+    """
+    Split galaxies into bins of dist_fil using p25, p50, p75.
+    Returns list of DataFrames and bin edges.
+    """
+    p25, p50, p75 = np.percentile(cat_z_mag["dist_fil"], [25, 50, 75])
+
+    bins = [
+        cat_z_mag[cat_z_mag["dist_fil"] <= p25],
+        cat_z_mag[(cat_z_mag["dist_fil"] > p25) & (cat_z_mag["dist_fil"] <= p50)],
+        cat_z_mag[(cat_z_mag["dist_fil"] > p50) & (cat_z_mag["dist_fil"] <= p75)],
+        cat_z_mag[cat_z_mag["dist_fil"] > p75],
+    ]
+
+    labels = [
+        f"$r_{{fil}} \\leq {p25:.1f}$",
+        f"${p25:.1f} < r_{{fil}} \\leq {p50:.1f}$",
+        f"${p50:.1f} < r_{{fil}} \\leq {p75:.1f}$",
+        f"$r_{{fil}} > {p75:.1f}$",
+    ]
+
+    return bins, labels, (p25, p50, p75)
+
+# def build_randoms_for_bins(bins, random_data):
+#     """
+#     Generate random catalogs for each dist_fil bin,
+#     matching redshift distributions.
+#     """
+#     randoms_bins = []
+
+#     for gxs in bins:
+#         red_rand = generate_random_red(
+#             gxs["red"].values,
+#             len(random_data),
+#             ran_method=ran_method,
+#             deg=deg,
+#         )
+#         rand = pd.DataFrame({
+#             "ra": random_data["ra"].values,
+#             "dec": random_data["dec"].values,
+#             "red": red_rand,
+#         })
+#         randoms_bins.append(rand)
+
+#     return randoms_bins
+
+def compute_xi_for_bins(bins, randoms_bins_list, config):
+    xi_list = []
+    varxi_list = []
+    s_list = []
+
+    for i, (gxs, rxs) in enumerate(zip(bins, randoms_bins_list)):
+        print(f"Computing xi for dist_fil bin {i} (N={len(gxs)})")
+        xi, varxi, s = calculate_xi(gxs, rxs, config, sample_name=f"bin{i}")
+        xi_list.append(xi)
+        varxi_list.append(varxi)
+        s_list.append(s)
+
+    return xi_list, varxi_list, s_list
+
+def plot_xi_dist_fil_bins(
+    xi_tot, varxi_tot, s_tot,
+    xi_list, varxi_list, s_list,
+    labels,
+    plotname=None
+):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.axvline(102, ls=":", c="k")
+
+    # --- total sample ---
+    sig_tot = np.sqrt(varxi_tot)
+    ax.errorbar(
+        s_tot,
+        xi_tot * s_tot**2,
+        yerr=sig_tot * s_tot**2,
+        lw=2.5,
+        color="k",
+        label="All galaxies",
+        capsize=3,
+    )
+
+    colors = ["C00", "C01", "C02", "C03"]
+    linestyles = ["-", "--", ":", "-."]
+
+    for xi, varxi, s, lab, c, ls in zip(
+        xi_list, varxi_list, s_list, labels, colors, linestyles
+    ):
+        sig = np.sqrt(varxi)
+        ax.errorbar(
+            s,
+            xi * s**2,
+            yerr=sig * s**2,
+            lw=2,
+            color=c,
+            ls=ls,
+            capsize=3,
+            label=lab,
+        )
+
+    # Include Luis data
+    data_luis = pd.read_csv('../data/test.out')
+    s1 = data_luis['s']
+    xi1 = data_luis['xi']
+    ax.plot(s1, xi1 * s1**2, color='k', lw=1, ls='--', label='Luis')
+
+    ax.set_xlabel(r"$s \,[h^{-1}\mathrm{Mpc}]$")
+    ax.set_ylabel(r"$s^2 \xi(s)$")
+    ax.legend()
+    plt.tight_layout()
+
+    if plotname:
+        print("Saving", plotname)
+        save_figure(fig, plotname, dpi=300)
+
+def plot_bin_data_and_randoms(
+    gxs: pd.DataFrame,
+    rxs: pd.DataFrame,
+    label: str,
+    plotname: str,
+    ):
+    """
+    Plot RA/Dec and redshift distributions for one dist_fil bin,
+    similar to plot_data_and_randoms but for a single population.
+    """
+    fig, axes = plt.subplots(3, 1, figsize=(7, 14))
+
+    # --- RA/DEC ---
+    axes[0].scatter(
+        rxs["ra"], rxs["dec"],
+        s=1.5, color="k", alpha=0.5, label="Randoms"
+    )
+    axes[0].scatter(
+        gxs["ra"], gxs["dec"],
+        s=1, color="C00", label="Galaxies"
+    )
+    axes[0].set_xlabel("RA")
+    axes[0].set_ylabel("DEC")
+    axes[0].legend(loc='upper right')
+    axes[0].set_title(label)
+
+    # --- Redshift histogram ---
+    axes[1].hist(
+        gxs["red"],
+        bins=50,
+        density=True,
+        histtype="stepfilled",
+        color="C00",
+        alpha=0.8,
+        label="Galaxies",
+    )
+    axes[1].hist(
+        rxs["red"],
+        bins=50,
+        density=True,
+        histtype="step",
+        color="k",
+        lw=1.5,
+        label="Randoms",
+    )
+    axes[1].set_xlabel("Redshift")
+    axes[1].set_ylabel("PDF")
+    axes[1].legend()
+
+    # --- dist_fil histogram (sanity check) ---
+    axes[2].hist(
+        gxs["dist_fil"],
+        bins=50,
+        density=True,
+        color="C03",
+        alpha=0.9,
+    )
+    axes[2].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
+    axes[2].set_ylabel("PDF")
+
+    plt.tight_layout()
+    save_figure(fig, plotname, dpi=200)
+
 
 def main():
     print("Loading catalog...")
     cat_full = load_catalog(sample)
     cat_z, cat_z_mag = select_sample(cat_full)
 
-    plot_redshift_k(cat_full, cat_z_mag, None)
+    plot_redshift_k(cat_full)
 
     print("Creating Random Catalogue...")
-    random_data = compute_and_save_random_catalog(cat_full, cat_z_mag, nside)
-    print("Data size: ", len(cat_z_mag))
-    print("Random size: ", len(random_data))
+    random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult)  # use cat_z_mag for mask and redshift distribution
 
-    filgxs, nonfilgxs, random_filgxs, random_nonfilgxs = split_filaments_and_randoms(cat_z_mag, random_data)
-    plot_data_and_randoms(filgxs, nonfilgxs, random_filgxs, random_nonfilgxs)
-    plot_dist_fil(cat_z_mag)
+    print("Computing total xi (full sample)")
+    xi_tot, varxi_tot, s_tot = calculate_xi(
+        cat_z_mag,
+        random_data,
+        config,
+        sample_name="total"
+    )
 
-    print("Filament galaxies:", len(filgxs))
-    print("Non-filament galaxies:", len(nonfilgxs))
+    print("Splitting galaxies by dist_fil bins")
+    bins, labels, percentiles = split_by_dist_fil_bins(cat_z_mag)
 
-    print("Calculating xi")
-    xi, varxi, s = calculate_xi(cat_z_mag, random_data, config, sample_name=sample)
+    print("Building random catalogs for each bin")
+    randoms_bins_list = []
+    for i in range(len(bins)):
+        randoms_bins_list.append( generate_random_catalog(bins[i], nside, nrand_mult) )
 
-    print("Calculating xi_fil")
-    xi_fil, varxi_fil, s_fil = calculate_xi(filgxs, random_filgxs, config, sample_name=sample)
+    print("Computing xi for each dist_fil bin")
+    xi_list, varxi_list, s_list = compute_xi_for_bins(
+        bins, randoms_bins_list, config
+    )
 
-    print("Calculating xi_nonfil")
-    xi_nonfil, varxi_nonfil, s_nonfil = calculate_xi(nonfilgxs, random_nonfilgxs, config, sample_name=sample)
+    print("Plotting spatial + redshift distributions")
+    # Plot full data first
+    plot_bin_data_and_randoms(
+        cat_z_mag,
+        random_data,
+        label="Full Sample",
+        plotname=f"../plots/bin_full_data_randoms_{name_modifier}.png",
+    )
+    # Plot each bin separately
+    for i, (gxs, rxs, lab) in enumerate(zip(bins, randoms_bins_list, labels)):
+        #print(len(gxs), len(rxs))
+        #print(rxs[:10])
+        plot_bin_data_and_randoms(
+            gxs,
+            rxs,
+            label=lab,
+            plotname=f"../plots/bin_{i}_data_randoms_{name_modifier}.png",
+        )
 
-    # print("Calculating cross_xi")
-    # random_all = random_data.copy()     # One master random catalog
-    # random_filgxs = random_all    # Use the SAME randoms for both
-    # random_nonfilgxs = random_all
-    # xi_cross, varxi_cross, s_cross = calculate_crossxi(filgxs, nonfilgxs, random_filgxs, random_nonfilgxs, config, sample_name=sample)
-
-    # Uncomment when skipping filament/non-filament calculation
-    # xi_fil, varxi_fil, s_fil = xi, varxi, s
-    # xi_nonfil, varxi_nonfil, s_nonfil = xi, varxi, s
-    xi_cross, varxi_cross, s_cross = None, None, None
-
-    plotname = f"../plots/xi_{name_modifier}.png"
-    plot_xi(xi, varxi, s, \
-            xi_fil, varxi_fil, s_fil, \
-            xi_nonfil, varxi_nonfil, s_nonfil, \
-            xi_cross, varxi_cross, s_cross, \
-            filgxs, nonfilgxs, cat_z_mag, \
-            plotname)
+    print("Plotting xi for total + dist_fil bins")
+    plotname = f"../plots/xi_dist_fil_bins_{name_modifier}.png"
+    plot_xi_dist_fil_bins(
+        xi_tot, varxi_tot, s_tot,
+        xi_list, varxi_list, s_list,
+        labels,
+        plotname=plotname
+    )
 
 
 if __name__ == "__main__":
