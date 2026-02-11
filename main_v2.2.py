@@ -29,7 +29,7 @@ from astropy.cosmology import FlatLambdaCDM
 sample = 'nyu'
 h = 0.6774  # Hubble constant
 #zmin, zmax = 0.07, 0.12  # Redshift range
-zmin, zmax = 0.07, 0.2  # Redshift range
+zmin, zmax = 0.05, 0.2  # Redshift range
 ran_method = 'poly'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
@@ -42,6 +42,7 @@ gr_min = 0.8
 #dist_max = 10.0
 nside = 256  # Healpix nside
 nrand_mult = 10  # Nr/Nd
+common_RADec = False  # Whether to use the same RA/Dec mask for all bins (True) or generate separate RA/Dec for each bin (False)
 
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
 
@@ -165,7 +166,7 @@ def build_cdf_from_parabola(
     return cdf_inv, z_vals, pdf_vals, cdf_vals
 
 
-def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, nrand: int) -> Tuple[np.ndarray, np.ndarray]:
+def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, num_randoms: int) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate nrand random RA/Dec pairs that fall on Healpix pixels marked by the input (ra,dec).
     Implementation preserved from original code.
@@ -178,9 +179,6 @@ def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, nrand: in
     pixels = hp.ang2pix(nside, theta, phi)
 
     mask[pixels] = 1
-
-    # number of uniform trial points (original code used int(10e6))
-    num_randoms = int(nrand*1.5)
 
     # Iterate until we have enough valid random points
     ra_random = np.random.uniform(0.0, 360.0, num_randoms)
@@ -196,8 +194,8 @@ def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, nrand: in
     ra_random = ra_random[valid_indices]
     dec_random = dec_random[valid_indices]
 
-    while ra_random.shape[0] < nrand:
-        additional_needed = nrand - ra_random.shape[0]
+    while ra_random.shape[0] < num_randoms:
+        additional_needed = num_randoms - ra_random.shape[0]
         ra_additional = np.random.uniform(0.0, 360.0, additional_needed * 2)
         u_additional = np.random.uniform(-1.0, 1.0, additional_needed * 2)
         dec_additional_rad = np.arcsin(u_additional)
@@ -214,10 +212,10 @@ def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, nrand: in
         ra_random = np.concatenate((ra_random, ra_valid))
         dec_random = np.concatenate((dec_random, dec_valid))
 
-    if ra_random.shape[0] < nrand:
+    if ra_random.shape[0] < num_randoms:
         raise ValueError("Not enough random points generated. Increase num_randoms or adjust nside.")
 
-    return ra_random[:nrand], dec_random[:nrand]
+    return ra_random[:num_randoms], dec_random[:num_randoms]
 
 
 def generate_random_red(redshift: np.ndarray, nrand: int, ran_method: str, deg: int) -> np.ndarray:
@@ -302,9 +300,7 @@ def generate_random_catalog(cat: pd.DataFrame, nside: int, nrand_mult: int, full
     else: 
         print("Using full catalog for RA/Dec mask")
         ra_random, dec_random = generate_random_radec(fullcat["ra"].values, fullcat["dec"].values, nside, nrand)
-        ra_random = ra_random[:nrand*len(ra)]
-        dec_random = dec_random[:nrand*len(ra)]
-
+        
     red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg)
 
     print("Data size:", len(cat))
@@ -659,7 +655,8 @@ def main():
     plot_redshift_k(cat_full)
 
     print("Creating Random Catalogue...")
-    random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult)  # use cat_z_mag for mask and redshift distribution
+    random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult, \
+                                          fullcat=cat_full if common_RADec else None)  # use cat_z_mag for mask and redshift distribution
 
     print("Computing total xi (full sample)")
     xi_tot, varxi_tot, s_tot = calculate_xi(
@@ -675,7 +672,8 @@ def main():
     print("Building random catalogs for each bin")
     randoms_bins_list = []
     for i in range(len(bins)):
-        randoms_bins_list.append( generate_random_catalog(bins[i], nside, nrand_mult) )
+        randoms_bins_list.append( generate_random_catalog(bins[i], nside, nrand_mult, \
+                                                          fullcat=cat_full if common_RADec else None) )
 
     print("Computing xi for each dist_fil bin")
     xi_list, varxi_list, s_list = compute_xi_for_bins(
