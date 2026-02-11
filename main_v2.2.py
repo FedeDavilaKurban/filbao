@@ -26,6 +26,8 @@ from astropy.cosmology import FlatLambdaCDM
 # ---------------------------
 # PARAMETERS 
 # ---------------------------
+
+# ---- Sample----------
 sample = 'nyu'
 h = 0.6774  # Hubble constant
 #zmin, zmax = 0.07, 0.12  # Redshift range
@@ -40,12 +42,18 @@ elif zmax == 0.2:
 gr_min = 0.8
 #dist_min = 5.0
 #dist_max = 10.0
+
+# ------ Random catalog parameters ------
 nside = 256  # Healpix nside
 nrand_mult = 10  # Nr/Nd
-common_RADec = False  # Whether to use the same RA/Dec mask for all bins (True) or generate separate RA/Dec for each bin (False)
+common_RADec = True  # Whether to use the same RA/Dec mask for all bins (True) or generate separate RA/Dec for each bin (False)
+read_RADec = True # Whether to read RA/Dec from file (True) or generate randomly (False); only applies if common_RADec is True
+RADec_filepath = '../data/lss_randoms_combined_cut.csv'  # Filepath for RA/Dec if read_RADec is True
 
+# ------ Output naming modifier --------
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
 
+# ------ Correlation function parameters ------
 minsep = 10.
 maxsep = 150.0
 nbins = 30
@@ -280,34 +288,36 @@ def select_sample(cat: pd.DataFrame) -> pd.DataFrame:
     """Apply redshift and magnitude cuts (preserves original behavior)."""
     cat_z = cat[(cat["red"] >= zmin) & (cat["red"] <= zmax)]
     if sample == "nyu":
-        cat_z_mag = cat_z[cat_z["mag_abs_r"] < mag_max]
+        cat_z_mag = cat_z[cat_z["mag_abs_r"] < mag_max].copy()  # <-- add .copy()
     else:
-        cat_z_mag = cat_z[cat_z["mag_abs_r"] - 5 * np.log10(h) < mag_max]
+        cat_z_mag = cat_z[cat_z["mag_abs_r"] - 5 * np.log10(h) < mag_max].copy()  # <-- add .copy()
     return cat_z, cat_z_mag
 
 
-def generate_random_catalog(cat: pd.DataFrame, nside: int, nrand_mult: int, fullcat: pd.DataFrame = None) -> pd.DataFrame:
-    print('Computing random catalog with method:', ran_method)
-    """Create random RA/Dec and redshift matching the mask and redshift distribution."""
-    ra = cat["ra"].values
-    dec = cat["dec"].values
+def generate_random_catalog(cat: pd.DataFrame, nside: int, nrand_mult: int, 
+                            ra_preload: np.ndarray = None, dec_preload: np.ndarray = None) -> pd.DataFrame:
+    """
+    Create random RA/Dec and redshift matching the mask and redshift distribution.
+    If ra_preload and dec_preload are provided, use them directly.
+    Otherwise, generate RA/Dec using the Healpix mask of cat.
+    """
     redshift = cat["red"].values
-
     nrand = int(nrand_mult * len(redshift))
 
-    if fullcat is None:
-        ra_random, dec_random = generate_random_radec(ra, dec, nside, nrand)
-    else: 
-        print("Using full catalog for RA/Dec mask")
-        ra_random, dec_random = generate_random_radec(fullcat["ra"].values, fullcat["dec"].values, nside, nrand)
-        
+    if ra_preload is not None and dec_preload is not None:
+        if len(ra_preload) < nrand:
+            raise ValueError(f"RA/Dec arrays contain {len(ra_preload)} points but {nrand} are needed.")
+        ra_random = ra_preload[:nrand]
+        dec_random = dec_preload[:nrand]
+    else:
+        # Generate RA/Dec using the Healpix mask from this catalog
+        print("Generating random RA/Dec from catalog mask...")
+        ra_random, dec_random = generate_random_radec(cat["ra"].values, cat["dec"].values, nside, nrand)
+
     red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg)
 
-    print("Data size:", len(cat))
-    print("Random size:", len(ra_random))
+    return pd.DataFrame({"ra": ra_random, "dec": dec_random, "red": red_random})
 
-    random_data = pd.DataFrame({"ra": ra_random, "dec": dec_random, "red": red_random})
-    return random_data
 
 
 def plot_redshift_k(cat: pd.DataFrame) -> None:
@@ -327,17 +337,29 @@ def plot_redshift_k(cat: pd.DataFrame) -> None:
     save_figure(fig, filename, dpi=100)
 
 
-def H(ra, dec, z, h_val):
-    """Return Cartesian coordinates (x,y,z) using astropy FlatLambdaCDM comoving_distance."""
-    ra = np.array(ra, dtype=np.float32)
-    dec = np.array(dec, dtype=np.float32)
-    red = np.array(z, dtype=np.float32)
+# def H(ra, dec, z, h_val):
+#     """Return Cartesian coordinates (x,y,z) using astropy FlatLambdaCDM comoving_distance."""
+#     ra = np.array(ra, dtype=np.float32)
+#     dec = np.array(dec, dtype=np.float32)
+#     red = np.array(z, dtype=np.float32)
 
-    r = np.float32(cosmo.comoving_distance(red).value) * h_val
-    x = r * np.cos(np.deg2rad(ra)) * np.cos(np.deg2rad(dec))
-    y = r * np.sin(np.deg2rad(ra)) * np.cos(np.deg2rad(dec))
-    zc = r * np.sin(np.deg2rad(dec))
-    return x, y, zc
+#     r = np.float32(cosmo.comoving_distance(red).value) * h_val
+#     x = r * np.cos(np.deg2rad(ra)) * np.cos(np.deg2rad(dec))
+#     y = r * np.sin(np.deg2rad(ra)) * np.cos(np.deg2rad(dec))
+#     zc = r * np.sin(np.deg2rad(dec))
+#     return x, y, zc
+
+def spherical_to_cartesian(ra, dec, r):
+    ra_rad = np.deg2rad(ra)
+    dec_rad = np.deg2rad(dec)
+
+    cos_dec = np.cos(dec_rad)
+
+    x = r * cos_dec * np.cos(ra_rad)
+    y = r * cos_dec * np.sin(ra_rad)
+    z = r * np.sin(dec_rad)
+
+    return x, y, z
 
 
 def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample_name: str = None):
@@ -345,8 +367,12 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample
     Compute xi(s) using TreeCorr NNCorrelation (preserved logic).
     Note: this preserves the original file-writing logic (including the possibly inverted sample check).
     """
-    randoms["x"], randoms["y"], randoms["z"] = H(randoms["ra"], randoms["dec"], randoms["red"], h)
-    data.loc[:, "x"], data.loc[:, "y"], data.loc[:, "z"] = H(data["ra"], data["dec"], data["red"], h)
+    data.loc[:, ["x", "y", "z"]] = np.column_stack(
+    spherical_to_cartesian(data["ra"].values, data["dec"].values, data["r"].values)
+    )
+    randoms.loc[:, ["x", "y", "z"]] = np.column_stack(
+        spherical_to_cartesian(randoms["ra"].values, randoms["dec"].values, randoms["r"].values)
+    )
 
     dd = treecorr.NNCorrelation(config)
     dr = treecorr.NNCorrelation(config)
@@ -377,11 +403,10 @@ def calculate_crossxi(data1: pd.DataFrame, data2: pd.DataFrame, randoms1: pd.Dat
     Compute cross xi(s) using TreeCorr NNCorrelation (preserved logic).
     Note: this preserves the original file-writing logic (including the possibly inverted sample check).
     """
-    randoms1["x"], randoms1["y"], randoms1["z"] = H(randoms1["ra"], randoms1["dec"], randoms1["red"], h)
-    data1.loc[:, "x"], data1.loc[:, "y"], data1.loc[:, "z"] = H(data1["ra"], data1["dec"], data1["red"], h)
-
-    randoms2["x"], randoms2["y"], randoms2["z"] = H(randoms2["ra"], randoms2["dec"], randoms2["red"], h)
-    data2.loc[:, "x"], data2.loc[:, "y"], data2.loc[:, "z"] = H(data2["ra"], data2["dec"], data2["red"], h)
+    data1.loc[:, ["x","y","z"]] = np.column_stack(spherical_to_cartesian(data1["ra"].values, data1["dec"].values, data1["r"].values))
+    randoms1.loc[:, ["x","y","z"]] = np.column_stack(spherical_to_cartesian(randoms1["ra"].values, randoms1["dec"].values, randoms1["r"].values))
+    data2.loc[:, ["x","y","z"]] = np.column_stack(spherical_to_cartesian(data2["ra"].values, data2["dec"].values, data2["r"].values))
+    randoms2.loc[:, ["x","y","z"]] = np.column_stack(spherical_to_cartesian(randoms2["ra"].values, randoms2["dec"].values, randoms2["r"].values))
 
     dd = treecorr.NNCorrelation(config)
     dr = treecorr.NNCorrelation(config)
@@ -652,13 +677,33 @@ def main():
     cat_full = load_catalog(sample)
     cat_z, cat_z_mag = select_sample(cat_full)
 
+    print("Precomputing comoving distances...")
+    cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
+
     plot_redshift_k(cat_full)
 
-    print("Creating Random Catalogue...")
-    random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult, \
-                                          fullcat=cat_full if common_RADec else None)  # use cat_z_mag for mask and redshift distribution
+    print("Creating Random Catalogue for full sample")
+    if common_RADec and read_RADec:
+        print("Reading RA/Dec file once for all bins...")
+        if os.path.exists(RADec_filepath):
+            radec_data = pd.read_csv(RADec_filepath)
+            ra_full = radec_data["ra"].values
+            dec_full = radec_data["dec"].values
+            print(f"RA/Dec loaded: {len(ra_full)} points")
+        else:
+            raise FileNotFoundError(f"RA/Dec file not found: {RADec_filepath}")
+    else:
+        ra_full = dec_full = None  # no preloaded RA/Dec
 
-    print("Computing total xi (full sample)")
+        random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult,
+                                            ra_full=ra_full, dec_full=dec_full)
+
+    # Full sample
+    random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult,
+                                        ra_preload=ra_full, dec_preload=dec_full)
+    random_data["r"] = cosmo.comoving_distance(random_data["red"].values).value * h
+
+    print("Computing xi for full sample")
     xi_tot, varxi_tot, s_tot = calculate_xi(
         cat_z_mag,
         random_data,
@@ -669,11 +714,23 @@ def main():
     print("Splitting galaxies by dist_fil bins")
     bins, labels, percentiles = split_by_dist_fil_bins(cat_z_mag)
 
-    print("Building random catalogs for each bin")
     randoms_bins_list = []
     for i in range(len(bins)):
-        randoms_bins_list.append( generate_random_catalog(bins[i], nside, nrand_mult, \
-                                                          fullcat=cat_full if common_RADec else None) )
+        print(f'---- Generating random catalog for dist_fil bin {i} -----')
+        rand_bin = generate_random_catalog(
+                                            bins[i],
+                                            nside,
+                                            nrand_mult,
+                                            ra_preload=ra_full if common_RADec else None,
+                                            dec_preload=dec_full if common_RADec else None
+                                        )
+
+
+        # PRECOMPUTE COMOVING DISTANCE HERE
+        rand_bin.loc[:, "r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
+
+        randoms_bins_list.append(rand_bin)
+
 
     print("Computing xi for each dist_fil bin")
     xi_list, varxi_list, s_list = compute_xi_for_bins(
