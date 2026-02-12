@@ -1,4 +1,8 @@
 """
+v2.3
+
+Implement weights to match n(z) between subsamples
+
 v2.2
 
 Compute random RA and Dec for each bin (instead of using a master RA and Dec)
@@ -31,8 +35,7 @@ from astropy.cosmology import FlatLambdaCDM
 sample = 'nyu'
 h = 0.6774  # Hubble constant
 #zmin, zmax = 0.07, 0.12  # Redshift range
-zmin, zmax = 0.07, 0.11  # Redshift range
-mag_max = -21.
+zmin, zmax = 0.05, 0.2  # Redshift range
 ran_method = 'poly'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
@@ -46,7 +49,7 @@ gr_min = 0.8
 
 # ------ Random catalog parameters ------
 nside = 256  # Healpix nside
-nrand_mult = 40  # Nr/Nd
+nrand_mult = 10  # Nr/Nd
 common_RADec = True  # Whether to use the same RA/Dec mask for all bins (True) or generate separate RA/Dec for each bin (False)
 read_RADec = True # Whether to read RA/Dec from file (True) or generate randomly (False); only applies if common_RADec is True
 RADec_filepath = '../data/lss_randoms_combined_cut.csv'  # Filepath for RA/Dec if read_RADec is True
@@ -337,6 +340,30 @@ def plot_redshift_k(cat: pd.DataFrame) -> None:
     print("Saving", filename)
     save_figure(fig, filename, dpi=100)
 
+def compute_nz_weights(cat_bins, z_edges=50):
+    """
+    Compute weights for each dist_fil bin to match the total n(z)
+    Returns a list of weight arrays corresponding to each bin.
+    """
+    # Total n(z)
+    all_red = np.concatenate([gxs["red"].values for gxs in cat_bins])
+    hist_tot, z_edges = np.histogram(all_red, bins=z_edges, density=True)
+    bin_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    
+    weights_bins = []
+    
+    for gxs in cat_bins:
+        hist_bin, _ = np.histogram(gxs["red"].values, bins=z_edges, density=True)
+        # Avoid division by zero
+        w = np.ones_like(gxs["red"].values, dtype=float)
+        if np.any(hist_bin > 0):
+            # Assign each galaxy a weight according to its z-bin
+            inds = np.digitize(gxs["red"].values, bins=z_edges) - 1
+            inds = np.clip(inds, 0, len(hist_tot)-1)
+            w = hist_tot[inds] / hist_bin[inds]
+        weights_bins.append(w)
+    
+    return weights_bins, bin_centers, hist_tot
 
 # def H(ra, dec, z, h_val):
 #     """Return Cartesian coordinates (x,y,z) using astropy FlatLambdaCDM comoving_distance."""
@@ -363,13 +390,9 @@ def spherical_to_cartesian(ra, dec, r):
     return x, y, z
 
 
-def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample_name: str = None):
-    """
-    Compute xi(s) using TreeCorr NNCorrelation (preserved logic).
-    Note: this preserves the original file-writing logic (including the possibly inverted sample check).
-    """
+def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, weights: np.ndarray = None, sample_name: str = None):
     data.loc[:, ["x", "y", "z"]] = np.column_stack(
-    spherical_to_cartesian(data["ra"].values, data["dec"].values, data["r"].values)
+        spherical_to_cartesian(data["ra"].values, data["dec"].values, data["r"].values)
     )
     randoms.loc[:, ["x", "y", "z"]] = np.column_stack(
         spherical_to_cartesian(randoms["ra"].values, randoms["dec"].values, randoms["r"].values)
@@ -379,7 +402,11 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample
     dr = treecorr.NNCorrelation(config)
     rr = treecorr.NNCorrelation(config)
 
-    gcat = treecorr.Catalog(x=data["x"], y=data["y"], z=data["z"], npatch=npatch)
+    gcat = treecorr.Catalog(
+        x=data["x"], y=data["y"], z=data["z"], 
+        w=weights,  # <-- here
+        npatch=npatch
+    )
     rcat = treecorr.Catalog(x=randoms["x"], y=randoms["y"], z=randoms["z"], patch_centers=gcat.patch_centers)
 
     dd.process(gcat)
@@ -388,16 +415,8 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample
 
     xi, varxi = dd.calculateXi(rr=rr, dr=dr)
 
-    # Preserve original file naming behavior (kept intentionally identical to input script)
-    if sample_name is not None:
-        rr.write("../data/rr.txt")
-        dd.write("../data/dd.txt")
-        dr.write("../data/dr.txt")
-    else:
-        rr.write(f"../data/rr_{sample_name}.txt")
-        dd.write(f"../data/dd_{sample_name}.txt")
-        dr.write(f"../data/dr_{sample_name}.txt")
     return xi, varxi, dd.meanr
+
 
 def calculate_crossxi(data1: pd.DataFrame, data2: pd.DataFrame, randoms1: pd.DataFrame, randoms2: pd.DataFrame, config: dict, sample_name: str = None):
     """
@@ -715,28 +734,31 @@ def main():
     print("Splitting galaxies by dist_fil bins")
     bins, labels, percentiles = split_by_dist_fil_bins(cat_z_mag)
 
+    # Compute weights to match n(z)
+    weights_bins, z_bin_centers, hist_tot = compute_nz_weights(bins)
+
+    # Generate random catalogs
     randoms_bins_list = []
-    for i in range(len(bins)):
-        print(f'---- Generating random catalog for dist_fil bin {i} -----')
+    for i, gxs in enumerate(bins):
         rand_bin = generate_random_catalog(
-                                            bins[i],
-                                            nside,
-                                            nrand_mult,
-                                            ra_preload=ra_full if common_RADec else None,
-                                            dec_preload=dec_full if common_RADec else None
-                                        )
-
-
-        # PRECOMPUTE COMOVING DISTANCE HERE
+            gxs,
+            nside,
+            nrand_mult,
+            ra_preload=ra_full if common_RADec else None,
+            dec_preload=dec_full if common_RADec else None
+        )
         rand_bin.loc[:, "r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
-
         randoms_bins_list.append(rand_bin)
 
+    # Compute xi with weights
+    xi_list, varxi_list, s_list = [], [], []
+    for i, (gxs, rxs) in enumerate(zip(bins, randoms_bins_list)):
+        print(f"Computing xi for dist_fil bin {i} with n(z) weights")
+        xi, varxi, s = calculate_xi(gxs, rxs, config, weights=weights_bins[i], sample_name=f"bin{i}")
+        xi_list.append(xi)
+        varxi_list.append(varxi)
+        s_list.append(s)
 
-    print("Computing xi for each dist_fil bin")
-    xi_list, varxi_list, s_list = compute_xi_for_bins(
-        bins, randoms_bins_list, config
-    )
 
     print("Plotting spatial + redshift distributions")
     # Plot full data first
