@@ -1,4 +1,10 @@
 """
+v2.2.1
+
+- Option to cut data and randoms around an angular circle.
+This is to avoid edge effects.
+- Option to choose dist_fil bins by percentile, fixed edges, or equal width.
+
 v2.2
 
 -Compute random RA and Dec for each bin (instead of using a master RA and Dec)
@@ -33,10 +39,9 @@ from astropy.cosmology import FlatLambdaCDM
 # ---- Sample----------
 sample = 'nyu'
 h = 0.6774  # Hubble constant
-#zmin, zmax = 0.07, 0.12  # Redshift range
-zmin, zmax = 0.07, 0.11  # Redshift range
+zmin, zmax = 0.1, 0.15  # Redshift range
 mag_max = -21.
-ran_method = 'poly'  # ['random_choice', 'piecewise', 'poly']
+ran_method = 'random_choice'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
 if zmax == 0.12: 
@@ -44,25 +49,50 @@ if zmax == 0.12:
 elif zmax == 0.2:
     mag_max = -21.2  # Maximum magnitude
 gr_min = 0.8
-#dist_min = 5.0
-#dist_max = 10.0
+
+# ------ dist_fil binning ------
+dist_bin_mode = "custom_intervals"
+# Options:
+#   "percentile"  → automatic equal-count bins
+#   "fixed"       → user-defined bin edges
+#   "equal_width" → uniform width bins between min/max
+#   "custom_intervals" → user-defined arbitrary intervals (can be non-contiguous and overlapping)
+
+# Used only if dist_bin_mode == "custom_intervals"
+dist_bin_intervals = [
+    [(0, 20)],        # Bin 0
+    [(30, 60)],       # Bin 1
+]
+
+nbins_dist = 4   # used for percentile or equal_width modes
+
+# Only used if dist_bin_mode == "fixed"
+dist_bin_edges = [0, 5, 30]  # example edges in h^-1 Mpc
+
+# ------ Angular circular cut ------
+use_angular_cut = True
+ra_center = 185.0  # degrees
+dec_center = 35.0  # degrees
+theta_max = 36.0   # angular radius in degrees
 
 # ------ Random catalog parameters ------
 nside = 256  # Healpix nside
-nrand_mult = 40  # Nr/Nd
+nrand_mult = 30  # Nr/Nd
 common_RADec = True  # Whether to use the same RA/Dec mask for all bins (True) or generate separate RA/Dec for each bin (False)
 read_RADec = True # Whether to read RA/Dec from file (True) or generate randomly (False); only applies if common_RADec is True
 RADec_filepath = '../data/lss_randoms_combined_cut.csv'  # Filepath for RA/Dec if read_RADec is True
 
 # ------ Output naming modifier --------
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
+if use_angular_cut:
+    name_modifier += f'_circle'
 
 # ------ Correlation function parameters ------
 minsep = 10.
 maxsep = 150.0
 nbins = 30
 brute = False
-npatch = 10
+npatch = 30
 
 config = {
     "min_sep": minsep,
@@ -83,7 +113,6 @@ cosmo = FlatLambdaCDM(H0=h * 100, Om0=0.3089)
 # ---------------------------
 # HELPER FUNCTIONS
 # ---------------------------
-
 
 def safe_trapz(y: np.ndarray, x: np.ndarray) -> float:
     """Integrate y over x using np.trapz; fallback to np.trapezoid if necessary."""
@@ -249,11 +278,27 @@ def generate_random_red(redshift: np.ndarray, nrand: int, ran_method: str, deg: 
         raise ValueError(f"Unknown ran_method: {ran_method}")
     return red_random
 
+def angular_distance(ra1, dec1, ra2, dec2):
+    """
+    Great-circle angular distance (degrees)
+    Inputs in degrees.
+    """
+    ra1 = np.deg2rad(ra1)
+    dec1 = np.deg2rad(dec1)
+    ra2 = np.deg2rad(ra2)
+    dec2 = np.deg2rad(dec2)
+
+    cosang = (
+        np.sin(dec1) * np.sin(dec2)
+        + np.cos(dec1) * np.cos(dec2) * np.cos(ra1 - ra2)
+    )
+
+    cosang = np.clip(cosang, -1.0, 1.0)
+    return np.rad2deg(np.arccos(cosang))
 
 # ---------------------------
 # I/O & PLOTTING HELPERS
 # ---------------------------
-
 
 def ensure_dir_exists(path: str) -> None:
     d = os.path.dirname(path)
@@ -297,6 +342,23 @@ def select_sample(cat: pd.DataFrame) -> pd.DataFrame:
         cat_z_mag = cat_z[cat_z["mag_abs_r"] - 5 * np.log10(h) < mag_max].copy()  # <-- add .copy()
     return cat_z, cat_z_mag
 
+def apply_angular_cut(cat: pd.DataFrame,
+                      ra_center: float,
+                      dec_center: float,
+                      theta_max: float) -> pd.DataFrame:
+    """
+    Keep only objects within theta_max (deg)
+    from (ra_center, dec_center).
+    """
+    ang = angular_distance(
+        cat["ra"].values,
+        cat["dec"].values,
+        ra_center,
+        dec_center,
+    )
+
+    mask = ang <= theta_max
+    return cat.loc[mask].copy()
 
 def generate_random_catalog(cat: pd.DataFrame, nside: int, nrand_mult: int, 
                             ra_preload: np.ndarray = None, dec_preload: np.ndarray = None) -> pd.DataFrame:
@@ -318,7 +380,7 @@ def generate_random_catalog(cat: pd.DataFrame, nside: int, nrand_mult: int,
         print("Generating random RA/Dec from catalog mask...")
         ra_random, dec_random = generate_random_radec(cat["ra"].values, cat["dec"].values, nside, nrand)
 
-    red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg)
+    red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg if ran_method == "poly" else None)
 
     return pd.DataFrame({"ra": ra_random, "dec": dec_random, "red": red_random})
 
@@ -500,26 +562,82 @@ def plot_xi(xi, varxi, s, xi_fil, varxi_fil, s_fil, \
 
 def split_by_dist_fil_bins(cat_z_mag: pd.DataFrame):
     """
-    Split galaxies into bins of dist_fil using p25, p50, p75.
-    Returns list of DataFrames and bin edges.
+    Split galaxies into dist_fil bins using selected binning strategy.
+    Supports:
+        - percentile
+        - equal_width
+        - fixed
+        - custom_intervals
     """
-    p25, p50, p75 = np.percentile(cat_z_mag["dist_fil"], [25, 50, 75])
 
-    bins = [
-        cat_z_mag[cat_z_mag["dist_fil"] <= p25],
-        cat_z_mag[(cat_z_mag["dist_fil"] > p25) & (cat_z_mag["dist_fil"] <= p50)],
-        cat_z_mag[(cat_z_mag["dist_fil"] > p50) & (cat_z_mag["dist_fil"] <= p75)],
-        cat_z_mag[cat_z_mag["dist_fil"] > p75],
-    ]
+    values = cat_z_mag["dist_fil"].values
 
-    labels = [
-        f"$r_{{fil}} \\leq {p25:.1f}$",
-        f"${p25:.1f} < r_{{fil}} \\leq {p50:.1f}$",
-        f"${p50:.1f} < r_{{fil}} \\leq {p75:.1f}$",
-        f"$r_{{fil}} > {p75:.1f}$",
-    ]
+    # ---------------------------
+    # CUSTOM INTERVAL MODE
+    # ---------------------------
+    if dist_bin_mode == "custom_intervals":
 
-    return bins, labels, (p25, p50, p75)
+        bins = []
+        labels = []
+
+        for i, interval_list in enumerate(dist_bin_intervals):
+
+            mask_total = np.zeros_like(values, dtype=bool)
+
+            label_parts = []
+
+            for (lo, hi) in interval_list:
+                mask = (values >= lo) & (values <= hi)
+                mask_total |= mask
+                label_parts.append(f"{lo}-{hi}")
+
+            subset = cat_z_mag.loc[mask_total].copy()
+            bins.append(subset)
+
+            label = " ∪ ".join(label_parts)
+            labels.append(f"$r_{{fil}} \\in [{label}]$")
+
+        print("Custom bins:")
+        for i, b in enumerate(bins):
+            print(f"Bin {i}: N = {len(b)}")
+
+        return bins, labels, None
+
+    # ---------------------------
+    # Original modes below
+    # ---------------------------
+    elif dist_bin_mode == "percentile":
+        percentiles = np.linspace(0, 100, nbins_dist + 1)
+        edges = np.percentile(values, percentiles)
+
+    elif dist_bin_mode == "equal_width":
+        vmin, vmax = values.min(), values.max()
+        edges = np.linspace(vmin, vmax, nbins_dist + 1)
+
+    elif dist_bin_mode == "fixed":
+        edges = np.array(dist_bin_edges)
+
+    else:
+        raise ValueError(f"Unknown dist_bin_mode: {dist_bin_mode}")
+
+    bins = []
+    labels = []
+
+    for i in range(len(edges) - 1):
+        lo = edges[i]
+        hi = edges[i + 1]
+
+        if i == len(edges) - 2:
+            mask = (values >= lo) & (values <= hi)
+        else:
+            mask = (values >= lo) & (values < hi)
+
+        subset = cat_z_mag.loc[mask].copy()
+        bins.append(subset)
+
+        labels.append(f"${lo:.1f} < r_{{fil}} \\leq {hi:.1f}$")
+
+    return bins, labels, edges
 
 # def build_randoms_for_bins(bins, random_data):
 #     """
@@ -569,14 +687,23 @@ def plot_xi_dist_fil_bins(
 
     # --- total sample ---
     sig_tot = np.sqrt(varxi_tot)
-    ax.errorbar(
+    y_tot = xi_tot * s_tot**2
+    err_tot = sig_tot * s_tot**2
+
+    ax.plot(
         s_tot,
-        xi_tot * s_tot**2,
-        yerr=sig_tot * s_tot**2,
+        y_tot,
         lw=2.5,
         color="k",
         label="All galaxies",
-        capsize=3,
+    )
+
+    ax.fill_between(
+        s_tot,
+        y_tot - err_tot,
+        y_tot + err_tot,
+        alpha=0.25,
+        color="k"
     )
 
     colors = ["C00", "C01", "C02", "C03"]
@@ -586,17 +713,25 @@ def plot_xi_dist_fil_bins(
         xi_list, varxi_list, s_list, labels, colors, linestyles
     ):
         sig = np.sqrt(varxi)
-        ax.errorbar(
+        y = xi * s**2
+        err = sig * s**2
+
+        ax.plot(
             s,
-            xi * s**2,
-            yerr=sig * s**2,
+            y,
             lw=2,
             color=c,
             ls=ls,
-            capsize=3,
             label=lab,
         )
 
+        ax.fill_between(
+            s,
+            y - err,
+            y + err,
+            color=c,
+            alpha=0.25,
+        )
     # Include Luis data
     data_luis = pd.read_csv('../data/test.out')
     s1 = data_luis['s']
@@ -684,6 +819,15 @@ def main():
     print("Precomputing comoving distances...")
     cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
 
+    if use_angular_cut:
+        print("Applying angular cut to data...")
+        cat_z_mag = apply_angular_cut(
+            cat_z_mag,
+            ra_center,
+            dec_center,
+            theta_max,
+        )
+
     plot_redshift_k(cat_full)
 
     print("Creating Random Catalogue for full sample")
@@ -707,6 +851,15 @@ def main():
                                         ra_preload=ra_full, dec_preload=dec_full)
     random_data["r"] = cosmo.comoving_distance(random_data["red"].values).value * h
 
+    if use_angular_cut:
+        print("Applying angular cut to full randoms...")
+        random_data = apply_angular_cut(
+            random_data,
+            ra_center,
+            dec_center,
+            theta_max,
+        )
+
     print("Computing xi for full sample")
     xi_tot, varxi_tot, s_tot = calculate_xi(
         cat_z_mag,
@@ -717,6 +870,12 @@ def main():
 
     print("Splitting galaxies by dist_fil bins")
     bins, labels, percentiles = split_by_dist_fil_bins(cat_z_mag)
+
+    if use_angular_cut:
+        bins = [
+            apply_angular_cut(b, ra_center, dec_center, theta_max)
+            for b in bins
+        ]
 
     randoms_bins_list = []
     for i in range(len(bins)):
@@ -729,7 +888,14 @@ def main():
                                             dec_preload=dec_full if common_RADec else None
                                         )
 
-
+        if use_angular_cut:
+            rand_bin = apply_angular_cut(
+                rand_bin,
+                ra_center,
+                dec_center,
+                theta_max,
+            )
+            
         # PRECOMPUTE COMOVING DISTANCE HERE
         rand_bin.loc[:, "r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
 

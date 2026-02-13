@@ -5,7 +5,9 @@ Implement weights to match n(z) between subsamples
 
 v2.2
 
-Compute random RA and Dec for each bin (instead of using a master RA and Dec)
+-Compute random RA and Dec for each bin (instead of using a master RA and Dec)
+-Implemented possibility of reading RA/Dec from file (if common_RADec and read_RADec are both True) 
+or generating them on the fly (if common_RADec is True but read_RADec is False).
 
 v2.1
 
@@ -35,24 +37,29 @@ from astropy.cosmology import FlatLambdaCDM
 sample = 'nyu'
 h = 0.6774  # Hubble constant
 #zmin, zmax = 0.07, 0.12  # Redshift range
-zmin, zmax = 0.05, 0.2  # Redshift range
+zmin, zmax = 0.07, 0.12  # Redshift range
 ran_method = 'poly'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
 if zmax == 0.12: 
-    mag_max = -20.0  # Maximum magnitude
+    mag_max = -21.0  # Maximum magnitude
 elif zmax == 0.2:
     mag_max = -21.2  # Maximum magnitude
+else:
+    mag_max = -21.0
 gr_min = 0.8
 #dist_min = 5.0
 #dist_max = 10.0
 
 # ------ Random catalog parameters ------
 nside = 256  # Healpix nside
-nrand_mult = 10  # Nr/Nd
+nrand_mult = 30  # Nr/Nd
 common_RADec = True  # Whether to use the same RA/Dec mask for all bins (True) or generate separate RA/Dec for each bin (False)
 read_RADec = True # Whether to read RA/Dec from file (True) or generate randomly (False); only applies if common_RADec is True
 RADec_filepath = '../data/lss_randoms_combined_cut.csv'  # Filepath for RA/Dec if read_RADec is True
+
+# ------ Weighting parameters ------
+use_nz_weights = False  # Whether to compute and apply n(z) weights for each dist_fil bin
 
 # ------ Output naming modifier --------
 name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
@@ -347,13 +354,15 @@ def compute_nz_weights(cat_bins, z_edges=50):
     """
     # Total n(z)
     all_red = np.concatenate([gxs["red"].values for gxs in cat_bins])
-    hist_tot, z_edges = np.histogram(all_red, bins=z_edges, density=True)
+    hist_tot, z_edges = np.histogram(all_red, bins=z_edges, density=False)
     bin_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
     
     weights_bins = []
     
     for gxs in cat_bins:
-        hist_bin, _ = np.histogram(gxs["red"].values, bins=z_edges, density=True)
+        hist_bin, _ = np.histogram(gxs["red"].values, bins=z_edges, density=False)
+        epsilon = 0.05 * np.max(hist_bin)
+        hist_bin = np.maximum(hist_bin, epsilon)    
         # Avoid division by zero
         w = np.ones_like(gxs["red"].values, dtype=float)
         if np.any(hist_bin > 0):
@@ -364,6 +373,67 @@ def compute_nz_weights(cat_bins, z_edges=50):
         weights_bins.append(w)
     
     return weights_bins, bin_centers, hist_tot
+
+def plot_nz_matching(bins, weights_bins, z_edges=50, plotname=None):
+    """
+    Plot raw and weighted n(z) for each dist_fil bin
+    compared to total n(z).
+    """
+
+    # --- total ---
+    all_red = np.concatenate([gxs["red"].values for gxs in bins])
+    hist_tot, z_edges = np.histogram(all_red, bins=z_edges, density=True)
+    bin_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    ax.plot(bin_centers, hist_tot, color="k", lw=3, label="Total n(z)")
+
+    colors = ["C0", "C1", "C2", "C3"]
+
+    for i, (gxs, w, c) in enumerate(zip(bins, weights_bins, colors)):
+
+        # --- raw ---
+        hist_raw, _ = np.histogram(
+            gxs["red"].values,
+            bins=z_edges,
+            density=True
+        )
+
+        # --- weighted ---
+        hist_weighted, _ = np.histogram(
+            gxs["red"].values,
+            bins=z_edges,
+            weights=w,
+            density=True
+        )
+
+        ax.plot(
+            bin_centers,
+            hist_raw,
+            ls=":",
+            color=c,
+            alpha=0.7,
+            label=f"Bin {i} raw"
+        )
+
+        ax.plot(
+            bin_centers,
+            hist_weighted,
+            ls="-",
+            color=c,
+            lw=2,
+            label=f"Bin {i} weighted"
+        )
+
+    ax.set_xlabel("Redshift")
+    ax.set_ylabel("PDF")
+    ax.legend(ncol=2)
+    plt.tight_layout()
+
+    if plotname:
+        print("Saving", plotname)
+        save_figure(fig, plotname)
 
 # def H(ra, dec, z, h_val):
 #     """Return Cartesian coordinates (x,y,z) using astropy FlatLambdaCDM comoving_distance."""
@@ -693,9 +763,14 @@ def plot_bin_data_and_randoms(
 
 
 def main():
+    
     print("Loading catalog...")
     cat_full = load_catalog(sample)
     cat_z, cat_z_mag = select_sample(cat_full)
+
+    # Corte de prueba en dist_fil
+    cat_z_mag = cat_z_mag[cat_z_mag["dist_fil"] < 60.0]
+    #cat_full = cat_full[cat_full["dist_fil"] > 50.0]
 
     print("Precomputing comoving distances...")
     cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
@@ -735,7 +810,20 @@ def main():
     bins, labels, percentiles = split_by_dist_fil_bins(cat_z_mag)
 
     # Compute weights to match n(z)
-    weights_bins, z_bin_centers, hist_tot = compute_nz_weights(bins)
+    if use_nz_weights:
+        weights_bins, z_bin_centers, hist_tot = compute_nz_weights(bins)
+        for i, w in enumerate(weights_bins):
+            print(f"Bin {i}:")
+            print("   min weight:", w.min())
+            print("   max weight:", w.max())
+            print("   mean weight:", w.mean())
+
+        plot_nz_matching(
+            bins,
+            weights_bins,
+            z_edges=50,
+            plotname=f"../plots/nz_matching_{name_modifier}.png"
+        )
 
     # Generate random catalogs
     randoms_bins_list = []
@@ -754,7 +842,7 @@ def main():
     xi_list, varxi_list, s_list = [], [], []
     for i, (gxs, rxs) in enumerate(zip(bins, randoms_bins_list)):
         print(f"Computing xi for dist_fil bin {i} with n(z) weights")
-        xi, varxi, s = calculate_xi(gxs, rxs, config, weights=weights_bins[i], sample_name=f"bin{i}")
+        xi, varxi, s = calculate_xi(gxs, rxs, config, weights=weights_bins[i] if use_nz_weights else None, sample_name=f"bin{i}")
         xi_list.append(xi)
         varxi_list.append(varxi)
         s_list.append(s)
