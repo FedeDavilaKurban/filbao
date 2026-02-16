@@ -39,15 +39,11 @@ from astropy.cosmology import FlatLambdaCDM
 # ---- Sample----------
 sample = 'nyu'
 h = 0.6774  # Hubble constant
-zmin, zmax = 0.05, 0.11  # Redshift range
-mag_max = -20.5
+zmin, zmax = 0.07, 0.2  # Redshift range
+mag_max = -21.2
 ran_method = 'random_choice'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
-if zmax == 0.12: 
-    mag_max = -20.0  # Maximum magnitude
-elif zmax == 0.2:
-    mag_max = -21.2  # Maximum magnitude
 gr_min = 0.8
 
 # ------ dist_fil binning ------
@@ -60,17 +56,17 @@ dist_bin_mode = "custom_intervals"
 
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
-    [(0, 5)],        # Bin 0
-    [(30, 80)],       # Bin 1
+    [(0, 5)]        
 ]
 
-nbins_dist = 4   # used for percentile or equal_width modes
+# Used if dist_bin_mode is "percentile" or "equal_width"
+nbins_dist = 4   
 
 # Only used if dist_bin_mode == "fixed"
 dist_bin_edges = [0, 5, 30]  # example edges in h^-1 Mpc
 
 # ------ Angular circular cut ------
-use_angular_cut = True
+use_angular_cut = False
 ra_center = 185.0  # degrees
 dec_center = 35.0  # degrees
 theta_max = 36.0   # angular radius in degrees
