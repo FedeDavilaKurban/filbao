@@ -39,8 +39,8 @@ from astropy.cosmology import FlatLambdaCDM
 # ---- Sample----------
 sample = 'nyu'
 h = 0.6774  # Hubble constant
-zmin, zmax = 0.1, 0.15  # Redshift range
-mag_max = -21.
+zmin, zmax = 0.05, 0.11  # Redshift range
+mag_max = -20.5
 ran_method = 'random_choice'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
@@ -60,8 +60,8 @@ dist_bin_mode = "custom_intervals"
 
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
-    [(0, 20)],        # Bin 0
-    [(30, 60)],       # Bin 1
+    [(0, 5)],        # Bin 0
+    [(30, 80)],       # Bin 1
 ]
 
 nbins_dist = 4   # used for percentile or equal_width modes
@@ -83,12 +83,12 @@ read_RADec = True # Whether to read RA/Dec from file (True) or generate randomly
 RADec_filepath = '../data/lss_randoms_combined_cut.csv'  # Filepath for RA/Dec if read_RADec is True
 
 # ------ Output naming modifier --------
-name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.0f}_gr{gr_min:.1f}_nrand{nrand_mult}'
+name_modifier = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_nrand{nrand_mult}'
 if use_angular_cut:
     name_modifier += f'_circle'
 
 # ------ Correlation function parameters ------
-minsep = 10.
+minsep = 50.
 maxsep = 150.0
 nbins = 30
 brute = False
@@ -536,7 +536,13 @@ def plot_xi(xi, varxi, s, xi_fil, varxi_fil, s_fil, \
     data_luis = pd.read_csv('../data/test.out')
     s1 = data_luis['s']
     xi1 = data_luis['xi']
-    ax.plot(s1, xi1 * s1 ** 2, color='k', lw=1, ls='--', label='Luis')
+
+    # Filter for comparison
+    mask = s1 >= minsep
+    s1_filtered = s1[mask]
+    xi1_filtered = xi1[mask]
+
+    ax.plot(s1_filtered, xi1_filtered * s1_filtered ** 2, color='k', lw=1, ls='--', label='Luis')
 
     # optional check
     if xi_cross is not None:
@@ -639,29 +645,6 @@ def split_by_dist_fil_bins(cat_z_mag: pd.DataFrame):
 
     return bins, labels, edges
 
-# def build_randoms_for_bins(bins, random_data):
-#     """
-#     Generate random catalogs for each dist_fil bin,
-#     matching redshift distributions.
-#     """
-#     randoms_bins = []
-
-#     for gxs in bins:
-#         red_rand = generate_random_red(
-#             gxs["red"].values,
-#             len(random_data),
-#             ran_method=ran_method,
-#             deg=deg,
-#         )
-#         rand = pd.DataFrame({
-#             "ra": random_data["ra"].values,
-#             "dec": random_data["dec"].values,
-#             "red": red_rand,
-#         })
-#         randoms_bins.append(rand)
-
-#     return randoms_bins
-
 def compute_xi_for_bins(bins, randoms_bins_list, config):
     xi_list = []
     varxi_list = []
@@ -732,11 +715,17 @@ def plot_xi_dist_fil_bins(
             color=c,
             alpha=0.25,
         )
-    # Include Luis data
+    # optional reference data from file
     data_luis = pd.read_csv('../data/test.out')
     s1 = data_luis['s']
     xi1 = data_luis['xi']
-    ax.plot(s1, xi1 * s1**2, color='k', lw=1, ls='--', label='Luis')
+
+    # Filter for comparison
+    mask = s1 >= minsep
+    s1_filtered = s1[mask]
+    xi1_filtered = xi1[mask]
+
+    ax.plot(s1_filtered, xi1_filtered * s1_filtered ** 2, color='k', lw=1, ls='--', label='Luis')
 
     ax.set_xlabel(r"$s \,[h^{-1}\mathrm{Mpc}]$")
     ax.set_ylabel(r"$s^2 \xi(s)$")
