@@ -66,7 +66,7 @@ nbins_dist = 4
 dist_bin_edges = [0, 5, 30]  # example edges in h^-1 Mpc
 
 # ------ Angular circular cut ------
-use_angular_cut = False
+use_angular_cut = True
 ra_center = 185.0  # degrees
 dec_center = 35.0  # degrees
 theta_max = 36.0   # angular radius in degrees
@@ -84,9 +84,10 @@ if use_angular_cut:
     name_modifier += f'_circle'
 
 # ------ Correlation function parameters ------
-minsep = 50.
+minsep = 30.
 maxsep = 150.0
-nbins = 30
+bin_width = 3.5 #Mpc
+nbins = int((maxsep - minsep) / bin_width) #
 brute = False
 npatch = 30
 
