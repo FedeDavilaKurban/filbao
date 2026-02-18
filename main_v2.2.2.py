@@ -1,4 +1,8 @@
 """
+v2.2.2
+
+- When reading randoms from file, fit beta function to data Dec distribution and alter random Dec to match it.
+
 v2.2.1
 
 - Option to cut data and randoms around an angular circle.
@@ -28,6 +32,7 @@ import matplotlib.pyplot as plt
 
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
+from scipy import stats
 from numpy.polynomial.polynomial import Polynomial
 from matplotlib.colors import LogNorm
 from astropy.cosmology import FlatLambdaCDM
@@ -296,6 +301,119 @@ def angular_distance(ra1, dec1, ra2, dec2):
     cosang = np.clip(cosang, -1.0, 1.0)
     return np.rad2deg(np.arccos(cosang))
 
+def fit_beta_distribution(data):
+    """
+    Fit a Beta distribution to the data.
+    
+    Returns:
+    --------
+    function : Inverse CDF function for generating samples
+    tuple : (alpha, beta) fitted parameters
+    tuple : (min, max) data range
+    """
+    # Normalize data to [0, 1] range
+    data_min, data_max = data.min(), data.max()
+    data_norm = (data - data_min) / (data_max - data_min)
+    
+    # Add small epsilon to avoid 0 and 1 values
+    eps = 1e-6
+    data_norm = np.clip(data_norm, eps, 1 - eps)
+    
+    # Fit Beta distribution
+    a, b, loc, scale = stats.beta.fit(data_norm, floc=0, fscale=1)
+    
+    def inv_cdf(u):
+        """Inverse CDF for generating samples."""
+        samples_norm = stats.beta.ppf(u, a, b)
+        return data_min + samples_norm * (data_max - data_min)
+    
+    def pdf(x):
+        """PDF for visualization."""
+        x_norm = (x - data_min) / (data_max - data_min)
+        x_norm = np.clip(x_norm, eps, 1 - eps)
+        return stats.beta.pdf(x_norm, a, b) / (data_max - data_min)
+    
+    return inv_cdf, pdf, (a, b), (data_min, data_max)
+
+def fit_beta_distribution_v2(data):
+    """
+    Fit a Beta distribution to the data, ensuring min/max are preserved.
+    Uses a different normalization approach.
+    """
+    data_min, data_max = data.min(), data.max()
+    
+    # Normalize to (0,1) with a small offset from boundaries
+    # This ensures the actual min/max map to values slightly inside (0,1)
+    eps = 1e-6
+    data_norm = (data - data_min) / (data_max - data_min)
+    data_norm = data_norm * (1 - 2*eps) + eps
+    
+    # Fit Beta distribution
+    a, b, loc, scale = stats.beta.fit(data_norm, floc=0, fscale=1)
+    
+    def inv_cdf(u):
+        """Inverse CDF that preserves original range."""
+        # Generate normalized samples
+        samples_norm = stats.beta.ppf(u, a, b)
+        # Reverse the normalization
+        samples = (samples_norm - eps) / (1 - 2*eps)
+        samples = data_min + samples * (data_max - data_min)
+        return samples
+    
+    def pdf(x):
+        """PDF for visualization."""
+        # Transform x to normalized space
+        x_norm = (x - data_min) / (data_max - data_min)
+        x_norm = x_norm * (1 - 2*eps) + eps
+        x_norm = np.clip(x_norm, eps, 1 - eps)
+        
+        pdf_vals = stats.beta.pdf(x_norm, a, b)
+        # Jacobian factor for transformation
+        pdf_vals = pdf_vals * (1 - 2*eps) / (data_max - data_min)
+        return pdf_vals
+    
+    # Test: generate extreme values to verify range
+    test_u = np.array([0, 1])
+    test_samples = inv_cdf(test_u)
+    print(f"Beta fit: α={a:.3f}, β={b:.3f}")
+    print(f"Original range: [{data_min:.4f}, {data_max:.4f}]")
+    print(f"Generated range from u=0,1: [{test_samples[0]:.4f}, {test_samples[1]:.4f}]")
+    
+    return inv_cdf, pdf, (a, b), (data_min, data_max)
+
+def modify_dec_to_beta(dec_original, dec_inv_cdf, preserve_order=True):
+    """
+    Modify declination values to follow the target beta distribution.
+    
+    Parameters:
+    -----------
+    dec_original : array
+        Original declination values
+    dec_inv_cdf : function
+        Inverse CDF of target beta distribution
+    preserve_order : bool
+        If True, preserves the rank order (monotonic transformation)
+        If False, shuffles the new values
+    
+    Returns:
+    --------
+    array : Modified declination values
+    """
+    n = len(dec_original)
+    
+    if preserve_order:
+        # Method 1: Preserve the order (monotonic transformation)
+        # This keeps the same ranking but changes the distribution
+        ranks = stats.rankdata(dec_original) / (n + 1)  # Convert to percentiles
+        dec_modified = dec_inv_cdf(ranks)
+    else:
+        # Method 2: Don't preserve order (random reassignment)
+        # Generate new random values from the target distribution
+        u = np.random.uniform(0, 1, n)
+        dec_modified = dec_inv_cdf(u)
+    
+    return dec_modified
+
 # ---------------------------
 # I/O & PLOTTING HELPERS
 # ---------------------------
@@ -374,11 +492,14 @@ def generate_random_catalog(cat: pd.DataFrame, nside: int, nrand_mult: int,
         if len(ra_preload) < nrand:
             raise ValueError(f"RA/Dec arrays contain {len(ra_preload)} points but {nrand} are needed.")
         ra_random = ra_preload[:nrand]
-        dec_random = dec_preload[:nrand]
+        dec_inv_cdf, _, _, _ = fit_beta_distribution_v2(cat["dec"].values)
+        dec_random = modify_dec_to_beta(dec_preload[:nrand], dec_inv_cdf, preserve_order=True)
+
     else:
         # Generate RA/Dec using the Healpix mask from this catalog
         print("Generating random RA/Dec from catalog mask...")
         ra_random, dec_random = generate_random_radec(cat["ra"].values, cat["dec"].values, nside, nrand)
+
 
     red_random = generate_random_red(redshift, nrand, ran_method=ran_method, deg=deg if ran_method == "poly" else None)
 
