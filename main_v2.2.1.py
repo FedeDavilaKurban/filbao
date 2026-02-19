@@ -76,7 +76,7 @@ theta_max = 40.0   # angular radius in degrees
 
 # ------ Random catalog parameters ------
 nside = 256  # Healpix nside
-nrand_mult = 30  # Nr/Nd
+nrand_mult = 15  # Nr/Nd
 common_RADec = True  # Whether to use the same RA/Dec mask for all bins (True) or generate separate RA/Dec for each bin (False)
 read_RADec = True # Whether to read RA/Dec from file (True) or generate randomly (False); only applies if common_RADec is True
 RADec_filepath = '../data/lss_randoms_combined_cut.csv'  # Filepath for RA/Dec if read_RADec is True
@@ -210,7 +210,6 @@ def build_cdf_from_parabola(
 def generate_random_radec(ra: np.ndarray, dec: np.ndarray, nside: int, num_randoms: int) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate nrand random RA/Dec pairs that fall on Healpix pixels marked by the input (ra,dec).
-    Implementation preserved from original code.
     """
     npix = hp.nside2npix(nside)
     mask = np.zeros(npix, dtype=int)
@@ -854,9 +853,6 @@ def main():
             raise FileNotFoundError(f"RA/Dec file not found: {RADec_filepath}")
     else:
         ra_full = dec_full = None  # no preloaded RA/Dec
-
-        random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult,
-                                            ra_preload=ra_full, dec_preload=dec_full)
 
     # Full sample
     random_data = generate_random_catalog(cat_z_mag, nside, nrand_mult,
