@@ -71,8 +71,9 @@ dist_bin_mode = "custom_intervals"
 
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
-    [(0, 5)],
-    [(40, 80)],        
+    [(3, 5)],
+    [(5, 10)],
+    [(10, 20)],   
 ]
 
 # Used if dist_bin_mode is "percentile" or "equal_width"
@@ -97,10 +98,13 @@ common_RADec = True # Whether to use the same RA/Dec arrays for all bins (True) 
 #   'healpix'  : generate from Healpix mask of the data (original method)
 #   'file'     : read RA/Dec from an external file (requires read_RADec=True and RADec_filepath)
 #   'beta_mask': fit Beta distributions to data, then apply mask from external random file
-ran_radec_method = 'beta_mask'   # <-- set to desired method
+ran_radec_method = 'file'   # <-- set to desired method
 
 # Parameters for method='file' (kept for compatibility)
-RADec_filepath = '../data/random_catalog_beta_N1500000_nside128.csv'
+RADec_filepath = '../data/lss_randoms_combined_cut.csv'
+# options:
+# - '../data/random_catalog_beta_N1500000_nside128.csv'  (pre-generated RA/Dec using Beta+mask method, for consistency)
+# - '../data/lss_randoms_combined_cut.csv' (downloaded from NYU website)
 
 # Parameter for method='beta_mask'
 radec_mask_file = '../data/lss_randoms_combined_cut.csv'  # external random catalog to define the mask for RA/Dec generation
@@ -866,8 +870,8 @@ Running with parameters:
                 nrand_total=nrand_bin,
                 nside=nside,
                 ran_radec_method=ran_radec_method,
-                ra_preload=ra_full if common_RADec else None,
-                dec_preload=dec_full if common_RADec else None,
+                ra_preload=ra_random_file if common_RADec else None,
+                dec_preload=dec_random_file if common_RADec else None,
                 mask_file=radec_mask_file if ran_radec_method == 'beta_mask' else None,
                 cached_mask=cached_mask
             )[:2]   # take only RA and Dec, ignore mask

@@ -56,10 +56,8 @@ dist_bin_mode = "custom_intervals"
 
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
-    [(0, 5)],
-    [(5, 15)],
-    [(15, 30)],
-    [(30, 80)],        
+    [(0, 3)],
+    [(10, 20)],      
 ]
 
 # Used if dist_bin_mode is "percentile" or "equal_width"
