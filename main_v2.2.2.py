@@ -15,6 +15,8 @@ v2.2.2
 - Redshifts are always generated per bin using the bin's own redshift distribution.
 - Removed unused functions (calculate_crossxi, old plot_xi, commented helper).
 
+- Implemented weights for randoms based on declination distribution matching (to correct for any residual Dec-dependent selection effects).
+
 v2.2.1
 
 - Option to cut data and randoms around an angular circle.
@@ -33,6 +35,7 @@ v2.1
 """
 
 import os
+import shutil
 from typing import Tuple, Optional
 
 import numpy as np
@@ -71,9 +74,8 @@ dist_bin_mode = "custom_intervals"
 
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
-    [(3, 5)],
-    [(5, 10)],
-    [(10, 20)],   
+    [(0, 5)],
+    [(15, 30)],   
 ]
 
 # Used if dist_bin_mode is "percentile" or "equal_width"
@@ -89,7 +91,7 @@ dec_center = 35.0  # degrees
 theta_max = 38.0   # angular radius in degrees
 
 # ------ Random catalog parameters ------
-nside = 128  # Healpix nside
+nside = 256  # Healpix nside
 nrand_mult = 15  # Nr/Nd
 common_RADec = True # Whether to use the same RA/Dec arrays for all bins (True) or generate separate RA/Dec for each bin (False)
 
@@ -114,18 +116,19 @@ folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_nrand{nran
 if use_angular_cut:
     folderName += f'_circle'
 
-# Create output folder if it doesn't exist
+# Create output folder – if it exists, delete it and recreate a clean one
 output_folder = f"../plots/{folderName}/"
-if not os.path.exists(output_folder):
-    os.makedirs(output_folder)
+if os.path.exists(output_folder):
+    shutil.rmtree(output_folder)
+os.makedirs(output_folder)
 
 # ------ Correlation function parameters ------
-minsep = 20.
+minsep = 50.
 maxsep = 150.0
-bin_width = 3.5 #Mpc
+bin_width = 4 #Mpc
 nbins = int((maxsep - minsep) / bin_width) #
 brute = False
-npatch = 30
+npatch = 50
 
 config = {
     "min_sep": minsep,
@@ -270,6 +273,35 @@ def spherical_to_cartesian(ra, dec, r):
 
     return x, y, z
 
+def compute_dec_weights(
+    data_dec: np.ndarray,
+    rand_dec: np.ndarray,
+    nbins: int = 40,
+):
+    """
+    Compute declination weights for randoms so that
+    n_rand(dec) matches n_data(dec).
+    Returns array of weights for each random point.
+    """
+    hist_data, edges = np.histogram(data_dec, bins=nbins, density=True)
+    hist_rand, _ = np.histogram(rand_dec, bins=edges, density=True)
+
+    # Avoid division by zero
+    ratio = np.zeros_like(hist_data)
+    mask = hist_rand > 0
+    ratio[mask] = hist_data[mask] / hist_rand[mask]
+
+    # Assign weight to each random
+    bin_indices = np.digitize(rand_dec, edges) - 1
+    bin_indices = np.clip(bin_indices, 0, nbins - 1)
+
+    weights = ratio[bin_indices]
+    weights *= .3 # 
+
+    # Normalise weights so mean weight = 1
+    weights /= np.mean(weights)
+
+    return weights
 
 # ---------------------------
 # FUNCTIONS FOR GENERATING RA/DEC
@@ -545,6 +577,8 @@ def plot_radec_distribution(cat: pd.DataFrame, randoms: pd.DataFrame, subsample:
     axes[0].legend()
     axes[1].hist(randoms["dec"], bins=50, density=True, histtype="step", color="k", lw=1.5, label="Randoms")
     axes[1].hist(cat["dec"], bins=50, density=True, histtype="stepfilled", color="C00", alpha=0.8, label="Galaxies")
+    axes[1].hist(randoms["dec"], bins=50, density=True,
+            weights=randoms["weight"], linestyle='--', color='red', histtype='step', label="Weighted Randoms")
     axes[1].set_xlabel("Dec")
     axes[1].set_ylabel("Density")
     axes[1].legend()
@@ -577,9 +611,17 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample
     dr = treecorr.NNCorrelation(config)
     rr = treecorr.NNCorrelation(config)
 
-    gcat = treecorr.Catalog(x=data["x"], y=data["y"], z=data["z"], npatch=npatch)
-    rcat = treecorr.Catalog(x=randoms["x"], y=randoms["y"], z=randoms["z"],
-                            patch_centers=gcat.patch_centers)
+    gcat = treecorr.Catalog(
+        x=data["x"], y=data["y"], z=data["z"],
+        w=np.ones(len(data)),
+        npatch=npatch
+    )
+
+    rcat = treecorr.Catalog(
+        x=randoms["x"], y=randoms["y"], z=randoms["z"],
+        w=randoms["weight"].values,
+        patch_centers=gcat.patch_centers
+    )
 
     dd.process(gcat)
     rr.process(rcat)
@@ -750,12 +792,15 @@ Running with parameters:
 - dist_bin_edges: {dist_bin_edges if dist_bin_mode == "fixed" else "N/A"}
 - use_angular_cut: {use_angular_cut}
 - Angular cut center: (RA={ra_center if use_angular_cut else "N/A"}, Dec={dec_center if use_angular_cut else "N/A"})
-- Angular cut radius: {theta_max} degrees if use_angular_cut else "N/A"
+- Angular cut radius: {theta_max if use_angular_cut else "N/A"} degrees 
           """)
 
     # Loading catalogue and applying cuts
     cat_full = load_catalog(sample)
+    #cat_full = cat_full[cat_full['dec']>20.]
     cat_z, cat_z_mag = select_sample(cat_full)
+
+
 
     # Precomputing comoving distances
     cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
@@ -772,6 +817,7 @@ Running with parameters:
         print("Reading RA/Dec file once for all bins...")
         if os.path.exists(RADec_filepath):
             radec_data = pd.read_csv(RADec_filepath)
+            #radec_data = radec_data[radec_data['dec']>20.]
             ra_random_file = radec_data["ra"].values
             dec_random_file = radec_data["dec"].values
             print(f"RA/Dec loaded: {len(ra_random_file)} points")
@@ -833,6 +879,16 @@ Running with parameters:
     random_data = pd.DataFrame({"ra": ra_rand_full, "dec": dec_rand_full, "red": red_full})
     random_data["r"] = cosmo.comoving_distance(random_data["red"].values).value * h
 
+    # Compute Dec weights
+    rand_weights = compute_dec_weights(
+        cat_z_mag["dec"].values,
+        random_data["dec"].values,
+        nbins=40
+    )
+
+    random_data["weight"] = rand_weights
+
+    # Angular Cut if needed
     if use_angular_cut:
         print("Applying angular cut to full randoms...")
         random_data = apply_angular_cut(random_data, ra_center, dec_center, theta_max)
@@ -882,6 +938,12 @@ Running with parameters:
 
         rand_bin = pd.DataFrame({"ra": ra_bin, "dec": dec_bin, "red": red_bin})
         rand_bin["r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
+
+        rand_bin["weight"] = compute_dec_weights(
+            bin_df["dec"].values,
+            rand_bin["dec"].values,
+            nbins=40
+        )
 
         if use_angular_cut:
             rand_bin = apply_angular_cut(rand_bin, ra_center, dec_center, theta_max)
