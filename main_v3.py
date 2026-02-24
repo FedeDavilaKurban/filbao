@@ -132,7 +132,7 @@ if os.path.exists(output_folder):
 os.makedirs(output_folder)
 
 # ------ Correlation function parameters ------
-minsep = 30.
+minsep = 15.
 maxsep = 150.0
 bin_width = 3.5 #Mpc
 nbins = int((maxsep - minsep) / bin_width) #
