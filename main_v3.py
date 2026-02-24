@@ -1,4 +1,13 @@
 """
+v3
+
+- Redshift homogenisation: each bin's galaxies are weighted so that the weighted redshift distribution
+  matches that of the full sample. The random catalog weights combine the declination correction with
+  the same redshift factor to keep the Landy–Szalay estimator unbiased.
+- Galaxy weights are passed to TreeCorr via the `data_weights` argument.
+- Added `compute_z_weights` function (based on KDE) and integrated it into the main loop.
+- Deleted deprecated 'beta_mask' method for RA/Dec generation
+
 v2.2.2
 
 - New method to generate random RA/Dec: fit Beta distributions to the data (RA and Dec independently),
@@ -32,6 +41,7 @@ v2.2
 v2.1
 
 - Computes correlations for bins in dist_fil (instead of just filament vs non-filament).
+
 """
 
 import os
@@ -44,11 +54,12 @@ import healpy as hp
 import treecorr
 import matplotlib.pyplot as plt
 from scipy import stats
-from scipy.interpolate import interp1d
+from scipy.interpolate import interp1d, UnivariateSpline
 from scipy.optimize import curve_fit
 from numpy.polynomial.polynomial import Polynomial
 from matplotlib.colors import LogNorm
 from astropy.cosmology import FlatLambdaCDM
+from scipy.stats import gaussian_kde   # new import
 
 # ---------------------------
 # PARAMETERS 
@@ -75,7 +86,9 @@ dist_bin_mode = "custom_intervals"
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
     [(0, 5)],
-    [(15, 30)],   
+    [(5, 15)],
+    [(15, 35)],
+    [(35, 100)],   
 ]
 
 # Used if dist_bin_mode is "percentile" or "equal_width"
@@ -92,14 +105,13 @@ theta_max = 38.0   # angular radius in degrees
 
 # ------ Random catalog parameters ------
 nside = 256  # Healpix nside
-nrand_mult = 15  # Nr/Nd
+nrand_mult = 50  # Nr/Nd
 common_RADec = True # Whether to use the same RA/Dec arrays for all bins (True) or generate separate RA/Dec for each bin (False)
 
 # --- Method for generating RA/Dec ---
 # Options:
 #   'healpix'  : generate from Healpix mask of the data (original method)
 #   'file'     : read RA/Dec from an external file (requires read_RADec=True and RADec_filepath)
-#   'beta_mask': fit Beta distributions to data, then apply mask from external random file
 ran_radec_method = 'file'   # <-- set to desired method
 
 # Parameters for method='file' (kept for compatibility)
@@ -107,9 +119,6 @@ RADec_filepath = '../data/lss_randoms_combined_cut.csv'
 # options:
 # - '../data/random_catalog_beta_N1500000_nside128.csv'  (pre-generated RA/Dec using Beta+mask method, for consistency)
 # - '../data/lss_randoms_combined_cut.csv' (downloaded from NYU website)
-
-# Parameter for method='beta_mask'
-radec_mask_file = '../data/lss_randoms_combined_cut.csv'  # external random catalog to define the mask for RA/Dec generation
 
 # ------ Output folder --------
 folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
@@ -273,10 +282,6 @@ def spherical_to_cartesian(ra, dec, r):
 
     return x, y, z
 
-import numpy as np
-from scipy.stats import gaussian_kde
-from scipy.interpolate import UnivariateSpline
-
 
 def compute_dec_weights(
     data_dec,
@@ -399,6 +404,99 @@ def compute_dec_weights(
     weights /= np.mean(weights)
 
     return weights
+
+
+def compute_z_weights(
+    data_z,
+    rand_z,
+    target_kde,
+    alpha=1.0,
+    method="auto",
+    kde_threshold=1_000_000,
+    nbins=40,
+    spline_s=0.5,
+    bw_factor=1.2,
+    n_grid=300,
+    clip_range=(0.1, 10.0)
+):
+    """
+    Compute redshift weights for random catalog so that weighted randoms match target distribution.
+
+    Parameters
+    ----------
+    data_z : array
+        Redshifts of data catalog for this bin (used to build bin KDE)
+    rand_z : array
+        Redshifts of random catalog for this bin
+    target_kde : scipy.stats.gaussian_kde
+        KDE of the target redshift distribution (e.g., from full sample)
+    alpha : float, optional
+        Strength of correction (1 = full correction)
+    method : str
+        "auto", "kde", "spline", or "hist"
+    kde_threshold : int
+        Random catalog size below which KDE is used in auto mode
+    nbins : int
+        Number of bins for spline/hist method
+    spline_s : float
+        Smoothing parameter for spline
+    bw_factor : float
+        Bandwidth multiplier for KDE
+    n_grid : int
+        Number of grid points for KDE interpolation
+    clip_range : tuple
+        Min and max allowed weight values
+
+    Returns
+    -------
+    weights : array
+        Redshift weights for random catalog
+    """
+    n_rand = len(rand_z)
+
+    if method == "auto":
+        method = "kde" if n_rand < kde_threshold else "spline"
+
+    print(f"  Using {method} method for redshift weights")
+    epsilon = 1e-10
+
+    # Build bin KDE (or use histogram for spline)
+    if method in ["kde", "auto"]:
+        bin_kde = gaussian_kde(data_z)
+        bin_kde.set_bandwidth(bin_kde.factor * bw_factor)
+        # Evaluate target and bin KDE on random redshifts
+        target_dens = target_kde(rand_z)
+        bin_dens = bin_kde(rand_z)
+        raw_weights = (target_dens + epsilon) / (bin_dens + epsilon)
+
+    elif method == "spline":
+        # Use histogram and spline for robustness
+        hist_data, edges = np.histogram(data_z, bins=nbins)
+        hist_target = target_kde(0.5*(edges[:-1]+edges[1:])) * np.diff(edges) * len(data_z)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        ratio = (hist_target + epsilon) / (hist_data + epsilon)
+        spline = UnivariateSpline(centers, ratio, s=spline_s)
+        raw_weights = spline(rand_z)
+        raw_weights = np.clip(raw_weights, 0.01, None)
+
+    elif method == "hist":
+        hist_data, edges = np.histogram(data_z, bins=nbins)
+        hist_target = target_kde(0.5*(edges[:-1]+edges[1:])) * np.diff(edges) * len(data_z)
+        ratio = (hist_target + epsilon) / (hist_data + epsilon)
+        bin_indices = np.digitize(rand_z, edges) - 1
+        bin_indices = np.clip(bin_indices, 0, nbins - 1)
+        raw_weights = ratio[bin_indices]
+
+    else:
+        raise ValueError("method must be 'auto', 'kde', 'spline', or 'hist'")
+
+    # Apply clipping and scaling
+    weights = np.clip(raw_weights, clip_range[0], clip_range[1])
+    weights = 1.0 + alpha * (weights - 1.0)
+    weights /= np.mean(weights)
+
+    return weights
+
 
 # ---------------------------
 # FUNCTIONS FOR GENERATING RA/DEC
@@ -554,7 +652,6 @@ def generate_master_radec(
     ran_radec_method: str,
     ra_preload: Optional[np.ndarray] = None,
     dec_preload: Optional[np.ndarray] = None,
-    mask_file: Optional[str] = None,
     cached_mask: Optional[np.ndarray] = None
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
@@ -577,13 +674,6 @@ def generate_master_radec(
         )
         new_mask = cached_mask
 
-    elif ran_radec_method == 'beta_mask':
-        if mask_file is None:
-            raise ValueError("Method 'beta_mask' requires mask_file.")
-        print("Generating master RA/Dec using Beta fits and external mask...")
-        ra_master, dec_master, new_mask = generate_random_radec_beta_mask(
-            full_cat, nrand_total, nside, mask_file, cached_mask
-        )
     else:
         raise ValueError(f"Unknown ran_radec_method: {ran_radec_method}")
 
@@ -691,9 +781,22 @@ def plot_radec_distribution(cat: pd.DataFrame, randoms: pd.DataFrame, subsample:
     save_figure(fig, filename, dpi=100)
 
 
-def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample_name: str = None):
+def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, data_weights=None, sample_name: str = None):
     """
     Compute xi(s) using TreeCorr NNCorrelation.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Galaxy catalog with columns 'ra','dec','red','r' (comoving distance)
+    randoms : pd.DataFrame
+        Random catalog with same columns plus 'weight' (combined random weights)
+    config : dict
+        TreeCorr configuration
+    data_weights : array, optional
+        Weights for galaxies (if None, unit weights are used)
+    sample_name : str, optional
+        Identifier for output files
     """
     data = data.copy()
     randoms = randoms.copy()
@@ -708,9 +811,12 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample
     dr = treecorr.NNCorrelation(config)
     rr = treecorr.NNCorrelation(config)
 
+    if data_weights is None:
+        data_weights = np.ones(len(data))
+
     gcat = treecorr.Catalog(
         x=data["x"], y=data["y"], z=data["z"],
-        w=np.ones(len(data)),
+        w=data_weights,
         npatch=npatch
     )
 
@@ -726,14 +832,12 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, sample
 
     xi, varxi = dd.calculateXi(rr=rr, dr=dr)
 
+    # Optional: write files for debugging
     if sample_name is not None:
-        rr.write("../data/rr.txt")
-        dd.write("../data/dd.txt")
-        dr.write("../data/dr.txt")
-    else:
         rr.write(f"../data/rr_{sample_name}.txt")
         dd.write(f"../data/dd_{sample_name}.txt")
         dr.write(f"../data/dr_{sample_name}.txt")
+
     return xi, varxi, dd.meanr
 
 
@@ -788,7 +892,9 @@ def compute_xi_for_bins(bins, randoms_bins_list, config):
     xi_list, varxi_list, s_list = [], [], []
     for i, (gxs, rxs) in enumerate(zip(bins, randoms_bins_list)):
         print(f"Computing xi for dist_fil bin {i} (N={len(gxs)})")
-        xi, varxi, s = calculate_xi(gxs, rxs, config, sample_name=f"bin{i}")
+        # Use galaxy weights if present
+        data_w = gxs["weight"].values if "weight" in gxs.columns else None
+        xi, varxi, s = calculate_xi(gxs, rxs, config, data_weights=data_w, sample_name=f"bin{i}")
         xi_list.append(xi)
         varxi_list.append(varxi)
         s_list.append(s)
@@ -846,6 +952,7 @@ def plot_bin_data_and_randoms(
     rxs: pd.DataFrame,
     label: str,
     plotname: str,
+    gal_weights: Optional[np.ndarray] = None
 ):
     """Plot RA/Dec scatter and redshift histogram for one bin."""
     fig, axes = plt.subplots(3, 1, figsize=(7, 14))
@@ -857,10 +964,17 @@ def plot_bin_data_and_randoms(
     axes[0].legend(loc='upper right')
     axes[0].set_title(label)
 
+    # Redshift histogram: galaxies (unweighted)
     axes[1].hist(gxs["red"], bins=40, density=True, histtype="stepfilled",
-                 color="C00", alpha=0.8, label="Galaxies")
+                 color="C00", alpha=0.8, label="Galaxies (unweighted)")
+    # Redshift histogram: randoms (unweighted)
     axes[1].hist(rxs["red"], bins=40, density=True, histtype="step",
                  color="k", lw=1.5, label="Randoms")
+    # If galaxy weights provided, plot weighted histogram (dashed)
+    if gal_weights is not None:
+        axes[1].hist(gxs["red"], bins=40, density=True, weights=gal_weights,
+                     histtype="step", color="C00", linestyle="--", lw=2,
+                     label="Galaxies (weighted)")
     axes[1].set_xlabel("Redshift")
     axes[1].set_ylabel("PDF")
     axes[1].legend()
@@ -890,14 +1004,14 @@ Running with parameters:
 - use_angular_cut: {use_angular_cut}
 - Angular cut center: (RA={ra_center if use_angular_cut else "N/A"}, Dec={dec_center if use_angular_cut else "N/A"})
 - Angular cut radius: {theta_max if use_angular_cut else "N/A"} degrees 
+- common_RADec: {common_RADec}
+- redshift homogenisation method: {ran_method}
+
           """)
 
     # Loading catalogue and applying cuts
     cat_full = load_catalog(sample)
-    #cat_full = cat_full[cat_full['dec']>20.]
     cat_z, cat_z_mag = select_sample(cat_full)
-
-
 
     # Precomputing comoving distances
     cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
@@ -914,7 +1028,6 @@ Running with parameters:
         print("Reading RA/Dec file once for all bins...")
         if os.path.exists(RADec_filepath):
             radec_data = pd.read_csv(RADec_filepath)
-            #radec_data = radec_data[radec_data['dec']>20.]
             ra_random_file = radec_data["ra"].values
             dec_random_file = radec_data["dec"].values
             print(f"RA/Dec loaded: {len(ra_random_file)} points")
@@ -936,7 +1049,6 @@ Running with parameters:
             ran_radec_method=ran_radec_method,
             ra_preload=ra_random_file,
             dec_preload=dec_random_file,
-            mask_file=radec_mask_file if ran_radec_method == 'beta_mask' else None,
             cached_mask=None
         )
         print(f"Master RA/Dec generated: {len(master_ra)} points")
@@ -962,12 +1074,10 @@ Running with parameters:
             ran_radec_method=ran_radec_method,
             ra_preload=ra_random_file,
             dec_preload=dec_random_file,
-            mask_file=radec_mask_file if ran_radec_method == 'beta_mask' else None,
             cached_mask=None
         )
         ra_rand_full = master_ra_full[:nrand_full]
         dec_rand_full = master_dec_full[:nrand_full]
-        # cached_mask is not needed further because per‑bin will generate fresh if not common
         cached_mask = None
 
     # Generate redshifts for full sample
@@ -976,7 +1086,7 @@ Running with parameters:
     random_data = pd.DataFrame({"ra": ra_rand_full, "dec": dec_rand_full, "red": red_full})
     random_data["r"] = cosmo.comoving_distance(random_data["red"].values).value * h
 
-    # Compute Dec weights
+    # Compute Dec weights for full sample
     rand_weights = compute_dec_weights(
         cat_z_mag["dec"].values,
         random_data["dec"].values,
@@ -984,7 +1094,6 @@ Running with parameters:
         method="kde",
         alpha=1
     )
-
     random_data["weight"] = rand_weights
 
     # Angular Cut if needed
@@ -1001,7 +1110,11 @@ Running with parameters:
     if use_angular_cut:
         bins = [apply_angular_cut(b, ra_center, dec_center, theta_max) for b in bins]
 
-    # --- Generate random catalogs per bin ---
+    # --- Define target redshift distribution from full sample ---
+    target_kde = gaussian_kde(cat_z_mag["red"].values)
+    target_kde.set_bandwidth(target_kde.factor * 1.2)   # adjust smoothing as needed
+
+    # --- Generate random catalogs per bin with redshift homogenisation ---
     randoms_bins_list = []
     start_idx = 0  # for slicing master arrays
 
@@ -1019,7 +1132,6 @@ Running with parameters:
             start_idx = end_idx
         else:
             # Generate fresh RA/Dec for this bin using its own distribution
-            # We discard the updated mask because we don't reuse it across bins
             ra_bin, dec_bin = generate_master_radec(
                 full_cat=bin_df,
                 nrand_total=nrand_bin,
@@ -1027,18 +1139,18 @@ Running with parameters:
                 ran_radec_method=ran_radec_method,
                 ra_preload=ra_random_file if common_RADec else None,
                 dec_preload=dec_random_file if common_RADec else None,
-                mask_file=radec_mask_file if ran_radec_method == 'beta_mask' else None,
                 cached_mask=cached_mask
             )[:2]   # take only RA and Dec, ignore mask
 
-        # Generate redshifts for this bin
+        # Generate redshifts for this bin (from its own distribution)
         red_bin = generate_random_red(bin_df["red"].values, nrand_bin, ran_method,
                                       deg if ran_method == "poly" else None)
 
         rand_bin = pd.DataFrame({"ra": ra_bin, "dec": dec_bin, "red": red_bin})
         rand_bin["r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
 
-        rand_bin["weight"] = compute_dec_weights(
+        # ---- Declination weights (angular selection) ----
+        dec_weights = compute_dec_weights(
             bin_df["dec"].values,
             rand_bin["dec"].values,
             nbins=40,
@@ -1046,6 +1158,41 @@ Running with parameters:
             alpha=1
         )
 
+        # --- Redshift homogenisation weights (fast spline method) ---
+        # Bin the bin's galaxy redshifts
+        z_bin = bin_df["red"].values
+        n_bins_z = 40  # adjust as needed
+        hist_bin, bin_edges = np.histogram(z_bin, bins=n_bins_z, density=False)
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+
+        # Evaluate target KDE at bin centers (convert to counts for same units)
+        target_counts = target_kde(bin_centers) * len(z_bin) * (bin_edges[1] - bin_edges[0])
+
+        # Ratio (target / bin) with small epsilon
+        eps = 1e-10
+        ratio = (target_counts + eps) / (hist_bin + eps)
+
+        # Fit a spline (s=0.5 is a good starting point; adjust if noisy)
+        from scipy.interpolate import UnivariateSpline
+        spline_ratio = UnivariateSpline(bin_centers, ratio, s=0.5, ext='const')
+
+        # Galaxy weights: evaluate spline at galaxy redshifts, clip, normalize
+        gal_weight_raw = spline_ratio(z_bin)
+        gal_weight_raw = np.clip(gal_weight_raw, 0.1, 10.0)
+        gal_weight = gal_weight_raw / np.mean(gal_weight_raw)
+        bin_df.loc[:, "weight"] = gal_weight
+
+        # Random weights: evaluate spline at random redshifts, combine with dec weights
+        rand_z = rand_bin["red"].values
+        rand_z_weight_raw = spline_ratio(rand_z)
+        rand_z_weight_raw = np.clip(rand_z_weight_raw, 0.1, 10.0)
+
+        # Combined weight (redshift factor * declination weights)
+        combined_raw = rand_z_weight_raw * dec_weights
+        combined = combined_raw / np.mean(combined_raw)
+        rand_bin["weight"] = combined
+
+        # Optional angular cut
         if use_angular_cut:
             rand_bin = apply_angular_cut(rand_bin, ra_center, dec_center, theta_max)
 
@@ -1063,6 +1210,8 @@ Running with parameters:
         random_data,
         label="Full Sample",
         plotname=f"../plots/{folderName}/bin_full_data_randoms.png",
+        gal_weights=cat_z_mag["weight"].values if "weight" in cat_z_mag.columns else None
+
     )
     for i, (gxs, rxs, lab) in enumerate(zip(bins, randoms_bins_list, labels)):
         plot_bin_data_and_randoms(
@@ -1070,6 +1219,7 @@ Running with parameters:
             rxs,
             label=lab,
             plotname=f"../plots/{folderName}/bin_{i}_data_randoms.png",
+            gal_weights=gxs["weight"].values if "weight" in gxs.columns else None
         )
         plot_radec_distribution(gxs, rxs, subsample=i)
 
