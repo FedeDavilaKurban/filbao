@@ -92,7 +92,7 @@ dist_bin_intervals = [
 ]
 
 # Used if dist_bin_mode is "percentile" or "equal_width"
-nbins_dist = 4   
+nbins_dist = 3   
 
 # Only used if dist_bin_mode == "fixed"
 dist_bin_edges = [0, 5, 30]  # example edges in h^-1 Mpc
@@ -104,7 +104,7 @@ dec_center = 35.0  # degrees
 theta_max = 38.0   # angular radius in degrees
 
 # ------ Random catalog parameters ------
-nside = 256  # Healpix nside
+nside = 256 # Healpix nside
 nrand_mult = 15  # Nr/Nd
 common_RADec = True # Whether to use the same RA/Dec arrays for all bins (True) or generate separate RA/Dec for each bin (False)
 
@@ -1109,6 +1109,9 @@ Running with parameters:
 
     print("Computing xi for full sample")
     xi_tot, varxi_tot, s_tot = calculate_xi(cat_z_mag, random_data, config, sample_name="total")
+
+    # Cutting off any galaxis with dist_fil > 100 to avoid outliers dominating the binning
+    cat_z_mag = cat_z_mag[cat_z_mag["dist_fil"] <= 70].copy()
 
     print("Splitting galaxies by dist_fil bins")
     bins, labels, _ = split_by_dist_fil_bins(cat_z_mag)
