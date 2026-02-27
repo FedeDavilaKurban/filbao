@@ -67,6 +67,7 @@ from scipy.stats import gaussian_kde   # new import
 
 # ---- Sample----------
 sample = 'nyu'
+sigma = 5.0
 h = 0.6774  # Hubble constant
 zmin, zmax = 0.07, 0.2  # Redshift range
 mag_max = -21.2
@@ -76,7 +77,7 @@ if ran_method == 'poly':
 gr_min = 0.8
 
 # ------ dist_fil binning ------
-dist_bin_mode = "custom_intervals"
+dist_bin_mode = "percentile"
 # Options:
 #   "percentile"  → automatic equal-count bins
 #   "fixed"       → user-defined bin edges
@@ -85,10 +86,9 @@ dist_bin_mode = "custom_intervals"
 
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
-    [(0, 5)],
-    [(5, 15)],
-    [(15, 35)],
-    [(35, 100)],   
+    [(0, 3)],
+    [(8, 15)],
+    [(15, 30)],
 ]
 
 # Used if dist_bin_mode is "percentile" or "equal_width"
@@ -105,7 +105,7 @@ theta_max = 38.0   # angular radius in degrees
 
 # ------ Random catalog parameters ------
 nside = 256  # Healpix nside
-nrand_mult = 50  # Nr/Nd
+nrand_mult = 15  # Nr/Nd
 common_RADec = True # Whether to use the same RA/Dec arrays for all bins (True) or generate separate RA/Dec for each bin (False)
 
 # --- Method for generating RA/Dec ---
@@ -121,7 +121,7 @@ RADec_filepath = '../data/lss_randoms_combined_cut.csv'
 # - '../data/lss_randoms_combined_cut.csv' (downloaded from NYU website)
 
 # ------ Output folder --------
-folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
+folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
 if use_angular_cut:
     folderName += f'_circle'
 
@@ -132,7 +132,7 @@ if os.path.exists(output_folder):
 os.makedirs(output_folder)
 
 # ------ Correlation function parameters ------
-minsep = 15.
+minsep = 30.
 maxsep = 150.0
 bin_width = 3.5 #Mpc
 nbins = int((maxsep - minsep) / bin_width) #
@@ -703,14 +703,19 @@ def save_figure(fig, path: str, dpi: int = 300):
 def load_catalog(sample_name: str) -> pd.DataFrame:
     """Load the requested SDSS-like catalog."""
     if sample_name == "nyu":
-        datafile = "../data/sdss_dr72safe0_zmin_0.000_zmax_0.300_sigma_5.0.csv"
+        #datafile = "../data/sdss_dr72safe0_zmin_0.000_zmax_0.300_sigma_5.0.csv"
+        if sigma==5.0:
+            datafile = "../data/sdss_dr72safe0_sigma_5.0.csv"
+        elif sigma==3.0:
+            datafile = "../data/sdss_dr72safe0_sigma_3.0.csv"
     elif sample_name == "sdss":
         datafile = "../data/sdss_zmin_0.000_zmax_0.300_sigma_5.0.csv"
     else:
         raise ValueError("Invalid sample")
 
     cat = pd.read_csv(datafile)
-    cat["dist_fil"] /= h
+    if sample_name != "nyu":
+        cat["dist_fil"] /= h
     if gr_min != 0:
         cat = cat[cat["gr"] > gr_min]
     return cat
@@ -992,6 +997,7 @@ def main():
     print(f"""
 Running with parameters:
 - Sample: {sample}
+- Sigma for filament detection: {sigma}
 - Redshift range: {zmin} to {zmax}
 - Magnitude cut: {mag_max}
 - gr color cut: {gr_min}
@@ -1005,7 +1011,7 @@ Running with parameters:
 - Angular cut center: (RA={ra_center if use_angular_cut else "N/A"}, Dec={dec_center if use_angular_cut else "N/A"})
 - Angular cut radius: {theta_max if use_angular_cut else "N/A"} degrees 
 - common_RADec: {common_RADec}
-- redshift homogenisation method: {ran_method}
+- redshift homogenisation method: {ran_radec_method}
 
           """)
 
