@@ -102,7 +102,7 @@ dist_bin_edges = [0, 5, 30]  # example edges in h^-1 Mpc
 
 # ------ Random catalog parameters ------
 nside = 256 # Healpix nside
-nrand_mult = 500  # Nr/Nd
+nrand_mult = 10  # Nr/Nd
 
 # --- Method for generating RA/Dec ---
 # Options:
@@ -115,8 +115,7 @@ if nrand_mult > 50:
     RADec_filepath = '../data/lss_randoms_combined_cut_LARGE.csv'
 else:
     RADec_filepath = '../data/lss_randoms_combined_cut.csv'
-
-# options:
+# Options:
 # - '../data/random_catalog_beta_N1500000_nside128.csv'  (pre-generated RA/Dec using Beta+mask method, for consistency)
 # - '../data/lss_randoms_combined_cut.csv' (downloaded from NYU website)
 
@@ -612,7 +611,7 @@ def plot_radec_distribution(cat: pd.DataFrame, randoms: pd.DataFrame, subsample:
     axes[1].hist(cat["dec"], bins=40, density=True, histtype="stepfilled", color="C00", alpha=0.8, label="Galaxies")
     axes[1].hist(randoms["dec"], bins=40, density=True, histtype="step", color="k", lw=1.5, label="Randoms")
     axes[1].hist(randoms["dec"], bins=40, density=True,
-            weights=randoms["weight"], linestyle='--', color='red', histtype='step', label="Weighted Randoms")
+            weights=randoms["weight"], linestyle='--', color='k', histtype='step', label="Weighted Randoms")
     axes[1].set_xlabel("Dec")
     axes[1].set_ylabel("Density")
     axes[1].legend()
@@ -651,6 +650,9 @@ def plot_bin_data_and_randoms(
     # Redshift histogram: randoms (unweighted)
     axes[1].hist(rxs["red"], bins=40, density=True, histtype="step",
                  color="k", lw=1.5, label="Randoms")
+    # Redshift histogram: randoms (weighted)
+    axes[1].hist(rxs["red"], bins=40, density=True, weights=rxs["weight"],
+                    histtype="step", color="k", linestyle="--", lw=1.5, label="Randoms (weighted)")
     # If galaxy weights provided, plot weighted histogram (dashed)
     if gal_weights is not None:
         axes[1].hist(gxs["red"], bins=40, density=True, weights=gal_weights,
