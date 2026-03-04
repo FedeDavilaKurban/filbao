@@ -1,4 +1,10 @@
 """
+v3.1
+
+- Cleanup with DeepSeek
+- Removed Angular Cut option
+- Removed common_RADec option
+
 v3
 
 - Redshift homogenisation: each bin's galaxies are weighted so that the weighted redshift distribution
@@ -41,7 +47,6 @@ v2.2
 v2.1
 
 - Computes correlations for bins in dist_fil (instead of just filament vs non-filament).
-
 """
 
 import os
@@ -53,16 +58,15 @@ import pandas as pd
 import healpy as hp
 import treecorr
 import matplotlib.pyplot as plt
-from scipy import stats
 from scipy.interpolate import interp1d, UnivariateSpline
 from scipy.optimize import curve_fit
 from numpy.polynomial.polynomial import Polynomial
 from matplotlib.colors import LogNorm
 from astropy.cosmology import FlatLambdaCDM
-from scipy.stats import gaussian_kde   # new import
+from scipy.stats import gaussian_kde
 
 # ---------------------------
-# PARAMETERS 
+# PARAMETERS
 # ---------------------------
 
 # ---- Sample----------
@@ -87,7 +91,7 @@ dist_bin_mode = "custom_intervals"
 # Used only if dist_bin_mode == "custom_intervals"
 dist_bin_intervals = [
     [(0, 3)],
-    [(10, 100)],
+    [(15, 40)],
 ]
 
 # Used if dist_bin_mode is "percentile" or "equal_width"
@@ -96,16 +100,9 @@ nbins_dist = 3
 # Only used if dist_bin_mode == "fixed"
 dist_bin_edges = [0, 5, 30]  # example edges in h^-1 Mpc
 
-# ------ Angular circular cut ------
-use_angular_cut = False
-ra_center = 185.0  # degrees
-dec_center = 35.0  # degrees
-theta_max = 38.0   # angular radius in degrees
-
 # ------ Random catalog parameters ------
 nside = 256 # Healpix nside
-nrand_mult = 10  # Nr/Nd
-common_RADec = True # Whether to use the same RA/Dec arrays for all bins (True) or generate separate RA/Dec for each bin (False)
+nrand_mult = 500  # Nr/Nd
 
 # --- Method for generating RA/Dec ---
 # Options:
@@ -114,15 +111,17 @@ common_RADec = True # Whether to use the same RA/Dec arrays for all bins (True) 
 ran_radec_method = 'file'   # <-- set to desired method
 
 # Parameters for method='file' (kept for compatibility)
-RADec_filepath = '../data/lss_randoms_combined_cut.csv'
+if nrand_mult > 50:
+    RADec_filepath = '../data/lss_randoms_combined_cut_LARGE.csv'
+else:
+    RADec_filepath = '../data/lss_randoms_combined_cut.csv'
+
 # options:
 # - '../data/random_catalog_beta_N1500000_nside128.csv'  (pre-generated RA/Dec using Beta+mask method, for consistency)
 # - '../data/lss_randoms_combined_cut.csv' (downloaded from NYU website)
 
 # ------ Output folder --------
 folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
-if use_angular_cut:
-    folderName += f'_circle'
 
 # Create output folder – if it exists, delete it and recreate a clean one
 output_folder = f"../plots/{folderName}/"
@@ -155,7 +154,7 @@ config = {
 cosmo = FlatLambdaCDM(H0=h * 100, Om0=0.3089)
 
 # ---------------------------
-# HELPER FUNCTIONS
+# GENERAL HELPER FUNCTIONS
 # ---------------------------
 
 def safe_trapz(y: np.ndarray, x: np.ndarray) -> float:
@@ -165,6 +164,48 @@ def safe_trapz(y: np.ndarray, x: np.ndarray) -> float:
     except AttributeError:
         return np.trapz(y, x)
 
+
+def angular_distance(ra1, dec1, ra2, dec2):
+    """Great‑circle angular distance (degrees). Inputs in degrees."""
+    ra1 = np.deg2rad(ra1)
+    dec1 = np.deg2rad(dec1)
+    ra2 = np.deg2rad(ra2)
+    dec2 = np.deg2rad(dec2)
+
+    cosang = (np.sin(dec1) * np.sin(dec2) +
+              np.cos(dec1) * np.cos(dec2) * np.cos(ra1 - ra2))
+    cosang = np.clip(cosang, -1.0, 1.0)
+    return np.rad2deg(np.arccos(cosang))
+
+
+def spherical_to_cartesian(ra, dec, r):
+    """Convert spherical coordinates to Cartesian (x,y,z)."""
+    ra_rad = np.deg2rad(ra)
+    dec_rad = np.deg2rad(dec)
+    cos_dec = np.cos(dec_rad)
+
+    x = r * cos_dec * np.cos(ra_rad)
+    y = r * cos_dec * np.sin(ra_rad)
+    z = r * np.sin(dec_rad)
+
+    return x, y, z
+
+
+def ensure_dir_exists(path: str) -> None:
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d)
+
+
+def save_figure(fig, path: str, dpi: int = 300):
+    ensure_dir_exists(path)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------
+# REDSHIFT DISTRIBUTION FITTING (for random generation)
+# ---------------------------
 
 def build_cdf_from_line(
     data: np.ndarray, vmin: float, vmax: float, num_points: int = 10000
@@ -256,31 +297,9 @@ def generate_random_red(redshift: np.ndarray, nrand: int, ran_method: str, deg: 
     return red_random
 
 
-def angular_distance(ra1, dec1, ra2, dec2):
-    """Great‑circle angular distance (degrees). Inputs in degrees."""
-    ra1 = np.deg2rad(ra1)
-    dec1 = np.deg2rad(dec1)
-    ra2 = np.deg2rad(ra2)
-    dec2 = np.deg2rad(dec2)
-
-    cosang = (np.sin(dec1) * np.sin(dec2) +
-              np.cos(dec1) * np.cos(dec2) * np.cos(ra1 - ra2))
-    cosang = np.clip(cosang, -1.0, 1.0)
-    return np.rad2deg(np.arccos(cosang))
-
-
-def spherical_to_cartesian(ra, dec, r):
-    """Convert spherical coordinates to Cartesian (x,y,z)."""
-    ra_rad = np.deg2rad(ra)
-    dec_rad = np.deg2rad(dec)
-    cos_dec = np.cos(dec_rad)
-
-    x = r * cos_dec * np.cos(ra_rad)
-    y = r * cos_dec * np.sin(ra_rad)
-    z = r * np.sin(dec_rad)
-
-    return x, y, z
-
+# ---------------------------
+# WEIGHT COMPUTATION FUNCTIONS
+# ---------------------------
 
 def compute_dec_weights(
     data_dec,
@@ -405,100 +424,74 @@ def compute_dec_weights(
     return weights
 
 
-def compute_z_weights(
-    data_z,
-    rand_z,
-    target_kde,
-    alpha=1.0,
-    method="auto",
-    kde_threshold=1_000_000,
-    nbins=40,
-    spline_s=0.5,
-    bw_factor=1.2,
-    n_grid=300,
-    clip_range=(0.1, 10.0)
-):
+def apply_redshift_weights_spline(bin_galaxies: pd.DataFrame,
+                                   rand_catalog: pd.DataFrame,
+                                   target_kde: gaussian_kde,
+                                   dec_weights: np.ndarray) -> None:
     """
-    Compute redshift weights for random catalog so that weighted randoms match target distribution.
+    Compute redshift weights using a spline ratio method and assign them to
+    both the galaxy and random catalogs (in‑place).
+
+    The steps are exactly those originally implemented in the main loop:
+      1. Bin the bin's galaxy redshifts.
+      2. Evaluate the target KDE at the bin centers to get target counts.
+      3. Compute ratio = target / bin (with epsilon).
+      4. Fit a UnivariateSpline to the ratio (s=0.5, ext='const').
+      5. Galaxy weights = spline(bin_redshifts), clipped [0.1,10], normalized.
+      6. Random weights (redshift part) = spline(rand_redshifts), clipped [0.1,10].
+      7. Combined weight = redshift_part * dec_weights, normalized.
+
+    Note: Weighting the randoms is necessary because the Landy–Szalay estimator
+    requires that the weighted random catalog have the same redshift distribution
+    as the weighted galaxy sample. If only galaxies were weighted, the DR and RR
+    terms would be computed with mismatched distributions, biasing ξ(s).
 
     Parameters
     ----------
-    data_z : array
-        Redshifts of data catalog for this bin (used to build bin KDE)
-    rand_z : array
-        Redshifts of random catalog for this bin
+    bin_galaxies : pd.DataFrame
+        Galaxy sample for this bin (must contain 'red' column). Will get a 'weight' column.
+    rand_catalog : pd.DataFrame
+        Random catalog for this bin (must contain 'red' column). Will get a 'weight' column.
     target_kde : scipy.stats.gaussian_kde
-        KDE of the target redshift distribution (e.g., from full sample)
-    alpha : float, optional
-        Strength of correction (1 = full correction)
-    method : str
-        "auto", "kde", "spline", or "hist"
-    kde_threshold : int
-        Random catalog size below which KDE is used in auto mode
-    nbins : int
-        Number of bins for spline/hist method
-    spline_s : float
-        Smoothing parameter for spline
-    bw_factor : float
-        Bandwidth multiplier for KDE
-    n_grid : int
-        Number of grid points for KDE interpolation
-    clip_range : tuple
-        Min and max allowed weight values
-
-    Returns
-    -------
-    weights : array
-        Redshift weights for random catalog
+        KDE of the full sample redshift distribution.
+    dec_weights : np.ndarray
+        Pre‑computed declination weights for the random catalog (same length as rand_catalog).
     """
-    n_rand = len(rand_z)
+    # --- Redshift homogenisation weights (fast spline method) ---
+    z_bin = bin_galaxies["red"].values
+    n_bins_z = 40  # adjust as needed
+    hist_bin, bin_edges = np.histogram(z_bin, bins=n_bins_z, density=False)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
 
-    if method == "auto":
-        method = "kde" if n_rand < kde_threshold else "spline"
+    # Evaluate target KDE at bin centers (convert to counts for same units)
+    target_counts = target_kde(bin_centers) * len(z_bin) * (bin_edges[1] - bin_edges[0])
 
-    print(f"  Using {method} method for redshift weights")
-    epsilon = 1e-10
+    # Ratio (target / bin) with small epsilon
+    eps = 1e-10
+    ratio = (target_counts + eps) / (hist_bin + eps)
 
-    # Build bin KDE (or use histogram for spline)
-    if method in ["kde", "auto"]:
-        bin_kde = gaussian_kde(data_z)
-        bin_kde.set_bandwidth(bin_kde.factor * bw_factor)
-        # Evaluate target and bin KDE on random redshifts
-        target_dens = target_kde(rand_z)
-        bin_dens = bin_kde(rand_z)
-        raw_weights = (target_dens + epsilon) / (bin_dens + epsilon)
+    # Fit a spline (s=0.5 is a good starting point; adjust if noisy)
+    spline_ratio = UnivariateSpline(bin_centers, ratio, s=0.5, ext='const')
 
-    elif method == "spline":
-        # Use histogram and spline for robustness
-        hist_data, edges = np.histogram(data_z, bins=nbins)
-        hist_target = target_kde(0.5*(edges[:-1]+edges[1:])) * np.diff(edges) * len(data_z)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        ratio = (hist_target + epsilon) / (hist_data + epsilon)
-        spline = UnivariateSpline(centers, ratio, s=spline_s)
-        raw_weights = spline(rand_z)
-        raw_weights = np.clip(raw_weights, 0.01, None)
+    # Galaxy weights: evaluate spline at galaxy redshifts, clip, normalize
+    gal_weight_raw = spline_ratio(z_bin)
+    gal_weight_raw = np.clip(gal_weight_raw, 0.1, 10.0)
+    gal_weight = gal_weight_raw / np.mean(gal_weight_raw)
+    bin_galaxies.loc[:, "weight"] = gal_weight
 
-    elif method == "hist":
-        hist_data, edges = np.histogram(data_z, bins=nbins)
-        hist_target = target_kde(0.5*(edges[:-1]+edges[1:])) * np.diff(edges) * len(data_z)
-        ratio = (hist_target + epsilon) / (hist_data + epsilon)
-        bin_indices = np.digitize(rand_z, edges) - 1
-        bin_indices = np.clip(bin_indices, 0, nbins - 1)
-        raw_weights = ratio[bin_indices]
+    # Random weights: evaluate spline at random redshifts, combine with dec weights
+    rand_z = rand_catalog["red"].values
+    rand_z_weight_raw = spline_ratio(rand_z)
+    rand_z_weight_raw = np.clip(rand_z_weight_raw, 0.1, 10.0)
 
-    else:
-        raise ValueError("method must be 'auto', 'kde', 'spline', or 'hist'")
-
-    # Apply clipping and scaling
-    weights = np.clip(raw_weights, clip_range[0], clip_range[1])
-    weights = 1.0 + alpha * (weights - 1.0)
-    weights /= np.mean(weights)
-
-    return weights
+    # Combined weight (redshift factor * declination weights)
+    combined_raw = rand_z_weight_raw * dec_weights
+    combined = combined_raw / np.mean(combined_raw)
+    rand_catalog["weight"] = combined
 
 
 # ---------------------------
-# FUNCTIONS FOR GENERATING RA/DEC
+# RA/DEC GENERATION FUNCTIONS
 # ---------------------------
 
 def generate_random_radec_healpix(
@@ -555,107 +548,17 @@ def generate_random_radec_healpix(
     return ra_random[:num_randoms], dec_random[:num_randoms]
 
 
-def fit_beta_distribution(data):
-    """
-    Fit a Beta distribution to the data (after normalising to [0,1]).
-    Returns an inverse CDF function, the fitted parameters (alpha, beta), and the data range.
-    """
-    data_min, data_max = data.min(), data.max()
-    data_norm = (data - data_min) / (data_max - data_min)
-    eps = 1e-6
-    data_norm = np.clip(data_norm, eps, 1 - eps)
-
-    a, b, loc, scale = stats.beta.fit(data_norm, floc=0, fscale=1)
-
-    def inv_cdf(u):
-        samples_norm = stats.beta.ppf(u, a, b)
-        return data_min + samples_norm * (data_max - data_min)
-
-    return inv_cdf, (a, b), (data_min, data_max)
-
-
-def load_radec_mask(mask_file: str, nside: int) -> np.ndarray:
-    """
-    Load an external random catalog (with 'ra','dec' columns) and build a Healpix mask.
-    Returns a boolean array of length npix where True means the pixel is inside the footprint.
-    """
-    print(f"Loading RA/Dec mask from {mask_file}")
-    rand_cat = pd.read_csv(mask_file)
-    ra = rand_cat['ra'].values
-    dec = rand_cat['dec'].values
-
-    npix = hp.nside2npix(nside)
-    mask = np.zeros(npix, dtype=bool)
-
-    theta = np.radians(90.0 - dec)
-    phi = np.radians(ra)
-    pixels = hp.ang2pix(nside, theta, phi)
-
-    mask[pixels] = True
-    return mask
-
-
-def generate_random_radec_beta_mask(
-    cat: pd.DataFrame,
-    nrand: int,
-    nside: int,
-    mask_file: str,
-    cached_mask: Optional[np.ndarray] = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Generate RA/Dec for random catalog using Beta fits on `cat` RA and Dec,
-    then apply Healpix mask from `mask_file`. If `cached_mask` is provided, reuse it.
-    Returns arrays (ra, dec, mask) where mask is the updated cached mask (for potential reuse).
-    """
-    # Fit Beta distributions to the input catalog's RA and Dec
-    ra_inv_cdf, ra_params, ra_range = fit_beta_distribution(cat["ra"].values)
-    dec_inv_cdf, dec_params, dec_range = fit_beta_distribution(cat["dec"].values)
-
-    # Load or use cached mask
-    if cached_mask is None:
-        mask = load_radec_mask(mask_file, nside)
-    else:
-        mask = cached_mask
-
-    # Generate points until we have at least nrand valid ones
-    ra_valid = np.array([], dtype=float)
-    dec_valid = np.array([], dtype=float)
-
-    while len(ra_valid) < nrand:
-        batch_size = max(nrand * 2, 10000)
-        u_ra = np.random.uniform(0, 1, batch_size)
-        u_dec = np.random.uniform(0, 1, batch_size)
-
-        ra_batch = ra_inv_cdf(u_ra)
-        dec_batch = dec_inv_cdf(u_dec)
-
-        theta = np.radians(90.0 - dec_batch)
-        phi = np.radians(ra_batch)
-        pix = hp.ang2pix(nside, theta, phi)
-
-        valid = mask[pix]
-        ra_valid = np.concatenate([ra_valid, ra_batch[valid]])
-        dec_valid = np.concatenate([dec_valid, dec_batch[valid]])
-
-        if len(ra_valid) > nrand * 10:
-            print("Warning: Too many iterations in generate_random_radec_beta_mask. Check mask coverage.")
-            break
-
-    return ra_valid[:nrand], dec_valid[:nrand], mask
-
-
 def generate_master_radec(
     full_cat: pd.DataFrame,
     nrand_total: int,
     nside: int,
     ran_radec_method: str,
     ra_preload: Optional[np.ndarray] = None,
-    dec_preload: Optional[np.ndarray] = None,
-    cached_mask: Optional[np.ndarray] = None
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    dec_preload: Optional[np.ndarray] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate a master RA/Dec array of length nrand_total using the specified method.
-    Returns (ra_master, dec_master, updated_cached_mask).
+    Returns (ra_master, dec_master).
     """
     if ran_radec_method == 'file':
         if ra_preload is None or dec_preload is None:
@@ -664,39 +567,155 @@ def generate_master_radec(
             raise ValueError(f"RA/Dec arrays contain {len(ra_preload)} points but {nrand_total} are needed.")
         ra_master = ra_preload[:nrand_total]
         dec_master = dec_preload[:nrand_total]
-        new_mask = cached_mask
 
     elif ran_radec_method == 'healpix':
         print("Generating master RA/Dec from full sample's Healpix mask...")
         ra_master, dec_master = generate_random_radec_healpix(
             full_cat["ra"].values, full_cat["dec"].values, nside, nrand_total
         )
-        new_mask = cached_mask
 
     else:
         raise ValueError(f"Unknown ran_radec_method: {ran_radec_method}")
 
-    return ra_master, dec_master, new_mask
+    return ra_master, dec_master
 
 
 # ---------------------------
-# I/O & PLOTTING HELPERS
+# PLOTTING FUNCTIONS
 # ---------------------------
 
-def ensure_dir_exists(path: str) -> None:
-    d = os.path.dirname(path)
-    if d and not os.path.exists(d):
-        os.makedirs(d)
+def plot_redshift_k(cat: pd.DataFrame) -> None:
+    """Redshift‑magnitude 2D histogram."""
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.hist2d(cat["red"], cat["mag_abs_r"], bins=40, cmap="Blues", norm=LogNorm())
+    ax.axvline(zmin, color="k", linestyle=":")
+    ax.axvline(zmax, color="k", linestyle=":")
+    ax.axhline(mag_max, color="k", linestyle=":")
+    ax.invert_yaxis()
+    ax.set_xlabel("Redshift")
+    ax.set_ylabel("K")
+    cbar = plt.colorbar(ax.collections[0], ax=ax)
+    cbar.set_label('Number of galaxies')
+    filename = f"../plots/{folderName}/redshift_magnitude.png"
+    print("Saving", filename)
+    save_figure(fig, filename, dpi=100)
 
 
-def save_figure(fig, path: str, dpi: int = 300):
-    ensure_dir_exists(path)
-    fig.savefig(path, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
+def plot_radec_distribution(cat: pd.DataFrame, randoms: pd.DataFrame, subsample: int = None) -> None:
+    """Plot histograms of RA and Dec for data and randoms."""
+    fig, axes = plt.subplots(2, 1, figsize=(8, 10))
+    axes[0].hist(randoms["ra"], bins=40, density=True, histtype="step", color="k", lw=1.5, label="Randoms")
+    axes[0].hist(cat["ra"], bins=40, density=True, histtype="stepfilled", color="C00", alpha=0.8, label="Galaxies")
+    axes[0].set_xlabel("RA")
+    axes[0].set_ylabel("Density")
+    axes[0].legend()
+    axes[1].hist(cat["dec"], bins=40, density=True, histtype="stepfilled", color="C00", alpha=0.8, label="Galaxies")
+    axes[1].hist(randoms["dec"], bins=40, density=True, histtype="step", color="k", lw=1.5, label="Randoms")
+    axes[1].hist(randoms["dec"], bins=40, density=True,
+            weights=randoms["weight"], linestyle='--', color='red', histtype='step', label="Weighted Randoms")
+    axes[1].set_xlabel("Dec")
+    axes[1].set_ylabel("Density")
+    axes[1].legend()
+    if subsample is None:
+        filename = f"../plots/{folderName}/radec_distribution.png"
+        axtitle = 'Total sample'
+    else:
+        filename = f"../plots/{folderName}/radec_distribution_bin{subsample}.png"
+        axtitle = f"Bin {subsample}"
+    fig.suptitle(axtitle)
+    plt.tight_layout()
+    print("Saving", filename)
+    save_figure(fig, filename, dpi=100)
+
+
+def plot_bin_data_and_randoms(
+    gxs: pd.DataFrame,
+    rxs: pd.DataFrame,
+    label: str,
+    plotname: str,
+    gal_weights: Optional[np.ndarray] = None
+):
+    """Plot RA/Dec scatter and redshift histogram for one bin."""
+    fig, axes = plt.subplots(3, 1, figsize=(7, 14))
+
+    axes[0].scatter(rxs["ra"], rxs["dec"], s=1.5, color="k", alpha=0.5, label="Randoms")
+    axes[0].scatter(gxs["ra"], gxs["dec"], s=1, color="C00", label="Galaxies")
+    axes[0].set_xlabel("RA")
+    axes[0].set_ylabel("DEC")
+    axes[0].legend(loc='upper right')
+    axes[0].set_title(label)
+
+    # Redshift histogram: galaxies (unweighted)
+    axes[1].hist(gxs["red"], bins=40, density=True, histtype="stepfilled",
+                 color="C00", alpha=0.8, label="Galaxies (unweighted)")
+    # Redshift histogram: randoms (unweighted)
+    axes[1].hist(rxs["red"], bins=40, density=True, histtype="step",
+                 color="k", lw=1.5, label="Randoms")
+    # If galaxy weights provided, plot weighted histogram (dashed)
+    if gal_weights is not None:
+        axes[1].hist(gxs["red"], bins=40, density=True, weights=gal_weights,
+                     histtype="step", color="C00", linestyle="--", lw=2,
+                     label="Galaxies (weighted)")
+    axes[1].set_xlabel("Redshift")
+    axes[1].set_ylabel("PDF")
+    axes[1].legend()
+
+    axes[2].hist(gxs["dist_fil"], bins=40, density=True, color="C03", alpha=0.9)
+    axes[2].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
+    axes[2].set_ylabel("PDF")
+
+    plt.tight_layout()
+    save_figure(fig, plotname, dpi=200)
+
+
+def plot_xi_dist_fil_bins(
+    xi_tot, varxi_tot, s_tot,
+    xi_list, varxi_list, s_list,
+    labels,
+    plotname=None
+):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.axvline(102, ls=":", c="k")
+
+    # total sample
+    sig_tot = np.sqrt(varxi_tot)
+    y_tot = xi_tot * s_tot**2
+    err_tot = sig_tot * s_tot**2
+    ax.plot(s_tot, y_tot, lw=2.5, color="k", label="All galaxies")
+    ax.fill_between(s_tot, y_tot - err_tot, y_tot + err_tot, alpha=0.25, color="k")
+
+    colors = ["C00", "C01", "C02", "C03"]
+    linestyles = ["-", "--", ":", "-."]
+
+    for xi, varxi, s, lab, c, ls in zip(xi_list, varxi_list, s_list, labels, colors, linestyles):
+        sig = np.sqrt(varxi)
+        y = xi * s**2
+        err = sig * s**2
+        ax.plot(s, y, lw=2, color=c, ls=ls, label=lab)
+        ax.fill_between(s, y - err, y + err, color=c, alpha=0.25)
+
+    # optional Luis data
+    try:
+        data_luis = pd.read_csv('../data/test.out')
+        s1 = data_luis['s']
+        xi1 = data_luis['xi']
+        mask = s1 >= minsep
+        ax.plot(s1[mask], xi1[mask] * s1[mask]**2, color='k', lw=1, ls='--', label='Luis')
+    except FileNotFoundError:
+        pass
+
+    ax.set_xlabel(r"$s \,[h^{-1}\mathrm{Mpc}]$")
+    ax.set_ylabel(r"$s^2 \xi(s)$")
+    ax.legend()
+    plt.tight_layout()
+
+    if plotname:
+        print("Saving", plotname)
+        save_figure(fig, plotname, dpi=300)
 
 
 # ---------------------------
-# MAIN PROCEDURE
+# CATALOG LOADING / MANIPULATION
 # ---------------------------
 
 def load_catalog(sample_name: str) -> pd.DataFrame:
@@ -730,60 +749,56 @@ def select_sample(cat: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return cat_z, cat_z_mag
 
 
-def apply_angular_cut(cat: pd.DataFrame,
-                      ra_center: float,
-                      dec_center: float,
-                      theta_max: float) -> pd.DataFrame:
-    """Keep only objects within theta_max (deg) from (ra_center, dec_center)."""
-    ang = angular_distance(cat["ra"].values, cat["dec"].values,
-                           ra_center, dec_center)
-    mask = ang <= theta_max
-    return cat.loc[mask].copy()
+def split_by_dist_fil_bins(cat_z_mag: pd.DataFrame):
+    """
+    Split galaxies into dist_fil bins using selected binning strategy.
+    """
+    values = cat_z_mag["dist_fil"].values
 
+    if dist_bin_mode == "custom_intervals":
+        bins = []
+        labels = []
+        for i, interval_list in enumerate(dist_bin_intervals):
+            mask_total = np.zeros_like(values, dtype=bool)
+            label_parts = []
+            for lo, hi in interval_list:
+                mask = (values >= lo) & (values <= hi)
+                mask_total |= mask
+                label_parts.append(f"{lo}-{hi}")
+            subset = cat_z_mag.loc[mask_total].copy()
+            bins.append(subset)
+            label = " ∪ ".join(label_parts)
+            labels.append(f"$r_{{fil}} \\in [{label}]$")
+        return bins, labels, None
 
-def plot_redshift_k(cat: pd.DataFrame) -> None:
-    """Redshift‑magnitude 2D histogram."""
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.hist2d(cat["red"], cat["mag_abs_r"], bins=40, cmap="Blues", norm=LogNorm())
-    ax.axvline(zmin, color="k", linestyle=":")
-    ax.axvline(zmax, color="k", linestyle=":")
-    ax.axhline(mag_max, color="k", linestyle=":")
-    ax.invert_yaxis()
-    ax.set_xlabel("Redshift")
-    ax.set_ylabel("K")
-    cbar = plt.colorbar(ax.collections[0], ax=ax)
-    cbar.set_label('Number of galaxies')
-    filename = f"../plots/{folderName}/redshift_magnitude.png"
-    print("Saving", filename)
-    save_figure(fig, filename, dpi=100)
-
-
-def plot_radec_distribution(cat: pd.DataFrame, randoms: pd.DataFrame, subsample: int = None) -> None:
-    """Plot histograms of RA and Dec for data and randoms."""
-    fig, axes = plt.subplots(2, 1, figsize=(8, 10))
-    axes[0].hist(randoms["ra"], bins=40, density=True, histtype="step", color="k", lw=1.5, label="Randoms")
-    axes[0].hist(cat["ra"], bins=40, density=True, histtype="stepfilled", color="C00", alpha=0.8, label="Galaxies")
-    axes[0].set_xlabel("RA")
-    axes[0].set_ylabel("Density")
-    axes[0].legend()
-    axes[1].hist(randoms["dec"], bins=40, density=True, histtype="step", color="k", lw=1.5, label="Randoms")
-    axes[1].hist(cat["dec"], bins=40, density=True, histtype="stepfilled", color="C00", alpha=0.8, label="Galaxies")
-    axes[1].hist(randoms["dec"], bins=40, density=True,
-            weights=randoms["weight"], linestyle='--', color='red', histtype='step', label="Weighted Randoms")
-    axes[1].set_xlabel("Dec")
-    axes[1].set_ylabel("Density")
-    axes[1].legend()
-    if subsample is None:
-        filename = f"../plots/{folderName}/radec_distribution.png"
-        axtitle = 'Total sample'
+    elif dist_bin_mode == "percentile":
+        percentiles = np.linspace(0, 100, nbins_dist + 1)
+        edges = np.percentile(values, percentiles)
+    elif dist_bin_mode == "equal_width":
+        vmin, vmax = values.min(), values.max()
+        edges = np.linspace(vmin, vmax, nbins_dist + 1)
+    elif dist_bin_mode == "fixed":
+        edges = np.array(dist_bin_edges)
     else:
-        filename = f"../plots/{folderName}/radec_distribution_bin{subsample}.png"
-        axtitle = f"Bin {subsample}"
-    fig.suptitle(axtitle)
-    plt.tight_layout()
-    print("Saving", filename)
-    save_figure(fig, filename, dpi=100)
+        raise ValueError(f"Unknown dist_bin_mode: {dist_bin_mode}")
 
+    bins = []
+    labels = []
+    for i in range(len(edges) - 1):
+        lo, hi = edges[i], edges[i + 1]
+        if i == len(edges) - 2:
+            mask = (values >= lo) & (values <= hi)
+        else:
+            mask = (values >= lo) & (values < hi)
+        bins.append(cat_z_mag.loc[mask].copy())
+        labels.append(f"${lo:.1f} < r_{{fil}} \\leq {hi:.1f}$")
+
+    return bins, labels, edges
+
+
+# ---------------------------
+# CORRELATION FUNCTION
+# ---------------------------
 
 def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, data_weights=None, sample_name: str = None):
     """
@@ -845,53 +860,6 @@ def calculate_xi(data: pd.DataFrame, randoms: pd.DataFrame, config: dict, data_w
     return xi, varxi, dd.meanr
 
 
-def split_by_dist_fil_bins(cat_z_mag: pd.DataFrame):
-    """
-    Split galaxies into dist_fil bins using selected binning strategy.
-    """
-    values = cat_z_mag["dist_fil"].values
-
-    if dist_bin_mode == "custom_intervals":
-        bins = []
-        labels = []
-        for i, interval_list in enumerate(dist_bin_intervals):
-            mask_total = np.zeros_like(values, dtype=bool)
-            label_parts = []
-            for lo, hi in interval_list:
-                mask = (values >= lo) & (values <= hi)
-                mask_total |= mask
-                label_parts.append(f"{lo}-{hi}")
-            subset = cat_z_mag.loc[mask_total].copy()
-            bins.append(subset)
-            label = " ∪ ".join(label_parts)
-            labels.append(f"$r_{{fil}} \\in [{label}]$")
-        return bins, labels, None
-
-    elif dist_bin_mode == "percentile":
-        percentiles = np.linspace(0, 100, nbins_dist + 1)
-        edges = np.percentile(values, percentiles)
-    elif dist_bin_mode == "equal_width":
-        vmin, vmax = values.min(), values.max()
-        edges = np.linspace(vmin, vmax, nbins_dist + 1)
-    elif dist_bin_mode == "fixed":
-        edges = np.array(dist_bin_edges)
-    else:
-        raise ValueError(f"Unknown dist_bin_mode: {dist_bin_mode}")
-
-    bins = []
-    labels = []
-    for i in range(len(edges) - 1):
-        lo, hi = edges[i], edges[i + 1]
-        if i == len(edges) - 2:
-            mask = (values >= lo) & (values <= hi)
-        else:
-            mask = (values >= lo) & (values < hi)
-        bins.append(cat_z_mag.loc[mask].copy())
-        labels.append(f"${lo:.1f} < r_{{fil}} \\leq {hi:.1f}$")
-
-    return bins, labels, edges
-
-
 def compute_xi_for_bins(bins, randoms_bins_list, config):
     xi_list, varxi_list, s_list = [], [], []
     for i, (gxs, rxs) in enumerate(zip(bins, randoms_bins_list)):
@@ -905,114 +873,28 @@ def compute_xi_for_bins(bins, randoms_bins_list, config):
     return xi_list, varxi_list, s_list
 
 
-def plot_xi_dist_fil_bins(
-    xi_tot, varxi_tot, s_tot,
-    xi_list, varxi_list, s_list,
-    labels,
-    plotname=None
-):
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.axvline(102, ls=":", c="k")
-
-    # total sample
-    sig_tot = np.sqrt(varxi_tot)
-    y_tot = xi_tot * s_tot**2
-    err_tot = sig_tot * s_tot**2
-    ax.plot(s_tot, y_tot, lw=2.5, color="k", label="All galaxies")
-    ax.fill_between(s_tot, y_tot - err_tot, y_tot + err_tot, alpha=0.25, color="k")
-
-    colors = ["C00", "C01", "C02", "C03"]
-    linestyles = ["-", "--", ":", "-."]
-
-    for xi, varxi, s, lab, c, ls in zip(xi_list, varxi_list, s_list, labels, colors, linestyles):
-        sig = np.sqrt(varxi)
-        y = xi * s**2
-        err = sig * s**2
-        ax.plot(s, y, lw=2, color=c, ls=ls, label=lab)
-        ax.fill_between(s, y - err, y + err, color=c, alpha=0.25)
-
-    # optional Luis data
-    try:
-        data_luis = pd.read_csv('../data/test.out')
-        s1 = data_luis['s']
-        xi1 = data_luis['xi']
-        mask = s1 >= minsep
-        ax.plot(s1[mask], xi1[mask] * s1[mask]**2, color='k', lw=1, ls='--', label='Luis')
-    except FileNotFoundError:
-        pass
-
-    ax.set_xlabel(r"$s \,[h^{-1}\mathrm{Mpc}]$")
-    ax.set_ylabel(r"$s^2 \xi(s)$")
-    ax.legend()
-    plt.tight_layout()
-
-    if plotname:
-        print("Saving", plotname)
-        save_figure(fig, plotname, dpi=300)
-
-
-def plot_bin_data_and_randoms(
-    gxs: pd.DataFrame,
-    rxs: pd.DataFrame,
-    label: str,
-    plotname: str,
-    gal_weights: Optional[np.ndarray] = None
-):
-    """Plot RA/Dec scatter and redshift histogram for one bin."""
-    fig, axes = plt.subplots(3, 1, figsize=(7, 14))
-
-    axes[0].scatter(rxs["ra"], rxs["dec"], s=1.5, color="k", alpha=0.5, label="Randoms")
-    axes[0].scatter(gxs["ra"], gxs["dec"], s=1, color="C00", label="Galaxies")
-    axes[0].set_xlabel("RA")
-    axes[0].set_ylabel("DEC")
-    axes[0].legend(loc='upper right')
-    axes[0].set_title(label)
-
-    # Redshift histogram: galaxies (unweighted)
-    axes[1].hist(gxs["red"], bins=40, density=True, histtype="stepfilled",
-                 color="C00", alpha=0.8, label="Galaxies (unweighted)")
-    # Redshift histogram: randoms (unweighted)
-    axes[1].hist(rxs["red"], bins=40, density=True, histtype="step",
-                 color="k", lw=1.5, label="Randoms")
-    # If galaxy weights provided, plot weighted histogram (dashed)
-    if gal_weights is not None:
-        axes[1].hist(gxs["red"], bins=40, density=True, weights=gal_weights,
-                     histtype="step", color="C00", linestyle="--", lw=2,
-                     label="Galaxies (weighted)")
-    axes[1].set_xlabel("Redshift")
-    axes[1].set_ylabel("PDF")
-    axes[1].legend()
-
-    axes[2].hist(gxs["dist_fil"], bins=40, density=True, color="C03", alpha=0.9)
-    axes[2].set_xlabel(r"$r_{\rm fil}\,[h^{-1}\mathrm{Mpc}]$")
-    axes[2].set_ylabel("PDF")
-
-    plt.tight_layout()
-    save_figure(fig, plotname, dpi=200)
-
+# ---------------------------
+# MAIN PROCEDURE
+# ---------------------------
 
 def main():
     # Print parameters
     print(f"""
-Running with parameters:
-- Sample: {sample}
-- Sigma for filament detection: {sigma}
-- Redshift range: {zmin} to {zmax}
-- Magnitude cut: {mag_max}
-- gr color cut: {gr_min}
-- Random catalog method: {ran_radec_method}
-- nside: {nside}
-- nrand_mult: {nrand_mult}
-- dist_bin_mode: {dist_bin_mode}
-- dist_bin_intervals: {dist_bin_intervals if dist_bin_mode == "custom_intervals" else "N/A"}
-- dist_bin_edges: {dist_bin_edges if dist_bin_mode == "fixed" else "N/A"}
-- use_angular_cut: {use_angular_cut}
-- Angular cut center: (RA={ra_center if use_angular_cut else "N/A"}, Dec={dec_center if use_angular_cut else "N/A"})
-- Angular cut radius: {theta_max if use_angular_cut else "N/A"} degrees 
-- common_RADec: {common_RADec}
-- redshift homogenisation method: {ran_radec_method}
-
-          """)
+    Running with parameters:
+    - Sample: {sample}
+    - Sigma for filament detection: {sigma}
+    - Hubble constant h: {h}
+    - Redshift range: {zmin} to {zmax}
+    - Magnitude cut: {mag_max}
+    - gr color cut: {gr_min}
+    - Random catalog method: {ran_radec_method}
+    - Redshift generation method: {ran_method}{f' (degree {deg})' if ran_method == 'poly' else ''}
+    - nside: {nside}
+    - nrand_mult: {nrand_mult}
+    - dist_bin_mode: {dist_bin_mode}
+    - dist_bin_intervals: {dist_bin_intervals if dist_bin_mode == "custom_intervals" else "N/A"}
+    - dist_bin_edges: {dist_bin_edges if dist_bin_mode == "fixed" else "N/A"}
+    """)
 
     # Loading catalogue and applying cuts
     cat_full = load_catalog(sample)
@@ -1020,10 +902,6 @@ Running with parameters:
 
     # Precomputing comoving distances
     cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
-
-    # Apply angular cut if needed
-    if use_angular_cut:
-        cat_z_mag = apply_angular_cut(cat_z_mag, ra_center, dec_center, theta_max)
 
     # Plot K vs Redshift
     plot_redshift_k(cat_full)
@@ -1044,46 +922,24 @@ Running with parameters:
     # --- Determine total number of random points needed for all bins ---
     nrand_total = nrand_mult * len(cat_z_mag)
 
-    # --- Generate master RA/Dec if common_RADec is True ---
-    if common_RADec:
-        print("Generating master RA/Dec array for full sample...")
-        master_ra, master_dec, cached_mask = generate_master_radec(
-            full_cat=cat_z_mag,
-            nrand_total=nrand_total,
-            nside=nside,
-            ran_radec_method=ran_radec_method,
-            ra_preload=ra_random_file,
-            dec_preload=dec_random_file,
-            cached_mask=None
-        )
-        print(f"Master RA/Dec generated: {len(master_ra)} points")
-    else:
-        master_ra = master_dec = None
-        cached_mask = None
+    # --- Generate master RA/Dec for the full sample (shared by all bins) ---
+    print("Generating master RA/Dec array for full sample...")
+    master_ra, master_dec = generate_master_radec(
+        full_cat=cat_z_mag,
+        nrand_total=nrand_total,
+        nside=nside,
+        ran_radec_method=ran_radec_method,
+        ra_preload=ra_random_file,
+        dec_preload=dec_random_file
+    )
+    print(f"Master RA/Dec generated: {len(master_ra)} points")
 
     # --- Number of randoms for the full sample (used for total xi) ---
     nrand_full = nrand_mult * len(cat_z_mag)
 
-    # --- Generate random catalog for full sample ---
-    if common_RADec:
-        # Full sample random catalog uses the master RA/Dec (first nrand_full points)
-        ra_rand_full = master_ra[:nrand_full]
-        dec_rand_full = master_dec[:nrand_full]
-    else:
-        # Generate separate RA/Dec for the full sample (old behaviour)
-        print("Creating Random Catalogue for full sample (per‑bin generation not active)")
-        master_ra_full, master_dec_full, _ = generate_master_radec(
-            full_cat=cat_z_mag,
-            nrand_total=nrand_total,
-            nside=nside,
-            ran_radec_method=ran_radec_method,
-            ra_preload=ra_random_file,
-            dec_preload=dec_random_file,
-            cached_mask=None
-        )
-        ra_rand_full = master_ra_full[:nrand_full]
-        dec_rand_full = master_dec_full[:nrand_full]
-        cached_mask = None
+    # --- Generate random catalog for full sample using the master RA/Dec ---
+    ra_rand_full = master_ra[:nrand_full]
+    dec_rand_full = master_dec[:nrand_full]
 
     # Generate redshifts for full sample
     red_full = generate_random_red(cat_z_mag["red"].values, nrand_full, ran_method,
@@ -1101,22 +957,14 @@ Running with parameters:
     )
     random_data["weight"] = rand_weights
 
-    # Angular Cut if needed
-    if use_angular_cut:
-        print("Applying angular cut to full randoms...")
-        random_data = apply_angular_cut(random_data, ra_center, dec_center, theta_max)
-
     print("Computing xi for full sample")
     xi_tot, varxi_tot, s_tot = calculate_xi(cat_z_mag, random_data, config, sample_name="total")
 
-    # Cutting off any galaxis with dist_fil > 100 to avoid outliers dominating the binning
-    cat_z_mag = cat_z_mag[cat_z_mag["dist_fil"] <= 70].copy()
+    # Cutting off any galaxies with dist_fil > 100 to avoid outliers dominating the binning
+    #cat_z_mag = cat_z_mag[cat_z_mag["dist_fil"] <= 70].copy()
 
     print("Splitting galaxies by dist_fil bins")
     bins, labels, _ = split_by_dist_fil_bins(cat_z_mag)
-
-    if use_angular_cut:
-        bins = [apply_angular_cut(b, ra_center, dec_center, theta_max) for b in bins]
 
     # --- Define target redshift distribution from full sample ---
     target_kde = gaussian_kde(cat_z_mag["red"].values)
@@ -1130,25 +978,13 @@ Running with parameters:
         print(f'---- Generating random catalog for dist_fil bin {i} -----')
         nrand_bin = nrand_mult * len(bin_df)
 
-        if common_RADec:
-            # Slice master arrays
-            end_idx = start_idx + nrand_bin
-            if end_idx > len(master_ra):
-                raise ValueError(f"Master RA/Dec exhausted: need {end_idx} but only {len(master_ra)} available.")
-            ra_bin = master_ra[start_idx:end_idx]
-            dec_bin = master_dec[start_idx:end_idx]
-            start_idx = end_idx
-        else:
-            # Generate fresh RA/Dec for this bin using its own distribution
-            ra_bin, dec_bin = generate_master_radec(
-                full_cat=bin_df,
-                nrand_total=nrand_bin,
-                nside=nside,
-                ran_radec_method=ran_radec_method,
-                ra_preload=ra_random_file if common_RADec else None,
-                dec_preload=dec_random_file if common_RADec else None,
-                cached_mask=cached_mask
-            )[:2]   # take only RA and Dec, ignore mask
+        # Slice master arrays
+        end_idx = start_idx + nrand_bin
+        if end_idx > len(master_ra):
+            raise ValueError(f"Master RA/Dec exhausted: need {end_idx} but only {len(master_ra)} available.")
+        ra_bin = master_ra[start_idx:end_idx]
+        dec_bin = master_dec[start_idx:end_idx]
+        start_idx = end_idx
 
         # Generate redshifts for this bin (from its own distribution)
         red_bin = generate_random_red(bin_df["red"].values, nrand_bin, ran_method,
@@ -1166,43 +1002,13 @@ Running with parameters:
             alpha=1
         )
 
-        # --- Redshift homogenisation weights (fast spline method) ---
-        # Bin the bin's galaxy redshifts
-        z_bin = bin_df["red"].values
-        n_bins_z = 40  # adjust as needed
-        hist_bin, bin_edges = np.histogram(z_bin, bins=n_bins_z, density=False)
-        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-
-        # Evaluate target KDE at bin centers (convert to counts for same units)
-        target_counts = target_kde(bin_centers) * len(z_bin) * (bin_edges[1] - bin_edges[0])
-
-        # Ratio (target / bin) with small epsilon
-        eps = 1e-10
-        ratio = (target_counts + eps) / (hist_bin + eps)
-
-        # Fit a spline (s=0.5 is a good starting point; adjust if noisy)
-        from scipy.interpolate import UnivariateSpline
-        spline_ratio = UnivariateSpline(bin_centers, ratio, s=0.5, ext='const')
-
-        # Galaxy weights: evaluate spline at galaxy redshifts, clip, normalize
-        gal_weight_raw = spline_ratio(z_bin)
-        gal_weight_raw = np.clip(gal_weight_raw, 0.1, 10.0)
-        gal_weight = gal_weight_raw / np.mean(gal_weight_raw)
-        bin_df.loc[:, "weight"] = gal_weight
-
-        # Random weights: evaluate spline at random redshifts, combine with dec weights
-        rand_z = rand_bin["red"].values
-        rand_z_weight_raw = spline_ratio(rand_z)
-        rand_z_weight_raw = np.clip(rand_z_weight_raw, 0.1, 10.0)
-
-        # Combined weight (redshift factor * declination weights)
-        combined_raw = rand_z_weight_raw * dec_weights
-        combined = combined_raw / np.mean(combined_raw)
-        rand_bin["weight"] = combined
-
-        # Optional angular cut
-        if use_angular_cut:
-            rand_bin = apply_angular_cut(rand_bin, ra_center, dec_center, theta_max)
+        # --- Redshift homogenisation weights (using the exact spline method) ---
+        apply_redshift_weights_spline(
+            bin_galaxies=bin_df,
+            rand_catalog=rand_bin,
+            target_kde=target_kde,
+            dec_weights=dec_weights
+        )
 
         randoms_bins_list.append(rand_bin)
 
