@@ -78,7 +78,7 @@ mag_max = -21.2
 ran_method = 'random_choice'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
-gr_min = 0.8
+gr_min = 'none'
 
 # ------ dist_fil binning ------
 dist_bin_mode = "custom_intervals"
@@ -120,7 +120,7 @@ else:
 # - '../data/lss_randoms_combined_cut.csv' (downloaded from NYU website)
 
 # ------ Output folder --------
-folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
+folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min if gr_min != 'none' else 'none'}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
 
 # Create output folder – if it exists, delete it and recreate a clean one
 output_folder = f"../plots/{folderName}/"
@@ -736,7 +736,7 @@ def load_catalog(sample_name: str) -> pd.DataFrame:
     cat = pd.read_csv(datafile)
     if sample_name != "nyu":
         cat["dist_fil"] /= h
-    if gr_min != 0:
+    if gr_min != 'none':
         cat = cat[cat["gr"] > gr_min]
     return cat
 
