@@ -1,4 +1,8 @@
 """
+v3.2
+
+- Trying to calculate xi(sigma, pi)
+
 v3.1
 
 - Cleanup with DeepSeek
@@ -64,6 +68,8 @@ from numpy.polynomial.polynomial import Polynomial
 from matplotlib.colors import LogNorm
 from astropy.cosmology import FlatLambdaCDM
 from scipy.stats import gaussian_kde
+from multiprocessing import Pool, cpu_count
+from scipy.spatial import cKDTree
 
 # ---------------------------
 # PARAMETERS
@@ -71,6 +77,7 @@ from scipy.stats import gaussian_kde
 
 # ---- Sample----------
 sample = 'nyu'
+test_dilute = .3 # fraction of galaxies to keep for testing (set to 1.0 for full sample)
 sigma = 3.0
 h = 0.6774  # Hubble constant
 zmin, zmax = 0.07, 0.2  # Redshift range
@@ -79,6 +86,11 @@ ran_method = 'random_choice'  # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5  # degree of polynomial for redshift distribution fit 
 gr_min = 0.8
+
+# ------ 2D correlation function parameters ------
+min_sep_2d = 30.0          # minimum separation for ξ(σ, π) in Mpc/h
+max_sep_2d = 140.0         # maximum separation (can be changed)
+bin_size_2d = 4.0         # bin width
 
 # ------ dist_fil binning ------
 dist_bin_mode = "custom_intervals"
@@ -102,7 +114,7 @@ dist_bin_edges = [0, 5, 30]  # example edges in h^-1 Mpc
 
 # ------ Random catalog parameters ------
 nside = 256 # Healpix nside
-nrand_mult = 15  # Nr/Nd
+nrand_mult = 10  # Nr/Nd
 
 # --- Method for generating RA/Dec ---
 # Options:
@@ -120,7 +132,7 @@ else:
 # - '../data/lss_randoms_combined_cut.csv' (downloaded from NYU website)
 
 # ------ Output folder --------
-folderName = f'z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
+folderName = f'XISIGMAPI_z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min:.1f}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}'
 
 # Create output folder – if it exists, delete it and recreate a clean one
 output_folder = f"../plots/{folderName}/"
@@ -875,6 +887,119 @@ def compute_xi_for_bins(bins, randoms_bins_list, config):
     return xi_list, varxi_list, s_list
 
 
+# Whole chunk that computes and plots xi(sigma, pi)
+# ---------------------------
+# 2D CORRELATION FUNCTION ξ(σ, π) using Corrfunc
+# ---------------------------
+
+def xi_sigmapi_package(ra_data, dec_data, chi_data, ra_rand, dec_rand, chi_rand,
+                       data_weights=None, rand_weights=None,
+                       output_folder=None, plotname="xi_sigma_pi.png",
+                       min_sep=0.0, max_sep=50.0, bin_size=2.0):
+    """
+    Compute the 2D correlation function ξ(σ, π) using Corrfunc and save a plot.
+
+    Parameters
+    ----------
+    ra_data, dec_data, chi_data : array
+        Galaxy positions (RA, Dec in degrees, comoving distance in Mpc/h)
+    ra_rand, dec_rand, chi_rand : array
+        Random catalog positions
+    data_weights : array, optional
+        Weights for galaxies (if None, unit weights are used)
+    rand_weights : array, optional
+        Weights for random catalog (if None, unit weights are used)
+    output_folder : str, optional
+        Directory where the plot will be saved. If None, the plot is displayed interactively.
+    plotname : str
+        Name of the output plot file.
+    min_sep : float
+        Minimum separation (in Mpc/h) for the 2D bins.
+    max_sep : float
+        Maximum separation.
+    bin_size : float
+        Bin width.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+    import multiprocessing
+
+    # Check if Corrfunc is available
+    try:
+        from Corrfunc.theory.DDrppi import DDrppi
+    except ImportError:
+        raise ImportError("Corrfunc is not installed. Please run: pip install Corrfunc")
+
+    # Cartesian conversion
+    def sph2cart(ra, dec, chi):
+        x = chi * np.cos(np.radians(dec)) * np.cos(np.radians(ra))
+        y = chi * np.cos(np.radians(dec)) * np.sin(np.radians(ra))
+        z = chi * np.sin(np.radians(dec))
+        return x, y, z
+
+    x_data, y_data, z_data = sph2cart(ra_data, dec_data, chi_data)
+    x_rand, y_rand, z_rand = sph2cart(ra_rand, dec_rand, chi_rand)
+
+    # Binning parameters
+    nbins = int((max_sep - min_sep) / bin_size)
+    sbin = np.linspace(min_sep, max_sep, nbins + 1)  # σ bin edges
+    pimax = max_sep                                   # maximum π
+    nrbins = nbins                                     # number of π bins (same as σ bins)
+
+    # Number of threads (use all available)
+    nthreads = multiprocessing.cpu_count()
+
+    # ---- Data-Data (auto) ----
+    dd_counts = DDrppi(0, pimax, nrbins, sbin=sbin,
+                       X1=x_data, Y1=y_data, Z1=z_data,
+                       weight1=data_weights,
+                       nthreads=nthreads, verbose=False)
+    H_dd = dd_counts['npairs'].reshape(nbins, nbins)
+
+    # ---- Data-Random ----
+    dr_counts = DDrppi(0, pimax, nrbins, sbin=sbin,
+                       X1=x_data, Y1=y_data, Z1=z_data,
+                       X2=x_rand, Y2=y_rand, Z2=z_rand,
+                       weight1=data_weights,
+                       weight2=rand_weights,
+                       nthreads=nthreads, verbose=False)
+    H_dr = dr_counts['npairs'].reshape(nbins, nbins)
+
+    # ---- Random-Random (auto) ----
+    rr_counts = DDrppi(0, pimax, nrbins, sbin=sbin,
+                       X1=x_rand, Y1=y_rand, Z1=z_rand,
+                       weight1=rand_weights,
+                       nthreads=nthreads, verbose=False)
+    H_rr = rr_counts['npairs'].reshape(nbins, nbins)
+
+    # Landy‑Szalay estimator
+    with np.errstate(divide='ignore', invalid='ignore'):
+        xi = (H_dd - 2*H_dr + H_rr) / H_rr
+        xi[H_rr == 0] = 0
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(xi.T, origin='lower',
+                   extent=[sbin[0], sbin[-1], sbin[0], sbin[-1]],
+                   aspect='auto', cmap='RdBu_r')
+    ax.set_xlabel(r'$\sigma$ [$h^{-1}$ Mpc]')
+    ax.set_ylabel(r'$\pi$ [$h^{-1}$ Mpc]')
+    ax.set_title(r'2D Correlation Function $\xi(\sigma, \pi)$')
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(r'$\xi(\sigma,\pi)$')
+
+    if output_folder:
+        os.makedirs(output_folder, exist_ok=True)
+        outpath = os.path.join(output_folder, plotname)
+        fig.savefig(outpath, dpi=200, bbox_inches='tight')
+        print(f"Saved ξ(σ, π) plot to {outpath}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+    return xi, sbin
+
 # ---------------------------
 # MAIN PROCEDURE
 # ---------------------------
@@ -901,6 +1026,11 @@ def main():
     # Loading catalogue and applying cuts
     cat_full = load_catalog(sample)
     cat_z, cat_z_mag = select_sample(cat_full)
+
+    if test_dilute!=1:
+        print(f"Diluting sample by factor of {test_dilute} for testing...")
+        cat_z_mag = cat_z_mag.sample(frac=test_dilute, random_state=42).copy()
+        print(f"Sample diluted: {len(cat_z_mag)} galaxies")
 
     # Precomputing comoving distances
     cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
@@ -962,8 +1092,22 @@ def main():
     print("Computing xi for full sample")
     xi_tot, varxi_tot, s_tot = calculate_xi(cat_z_mag, random_data, config, sample_name="total")
 
-    # Cutting off any galaxies with dist_fil > 100 to avoid outliers dominating the binning
-    #cat_z_mag = cat_z_mag[cat_z_mag["dist_fil"] <= 70].copy()
+    # Compute xi(sigma, pi) for full sample
+    xi_sigmapi_package(
+        cat_z_mag["ra"].values,
+        cat_z_mag["dec"].values,
+        cat_z_mag["r"].values,
+        random_data["ra"].values,
+        random_data["dec"].values,
+        random_data["r"].values,
+        data_weights=cat_z_mag["weight"].values if "weight" in cat_z_mag.columns else None,
+        rand_weights=random_data["weight"].values if "weight" in random_data.columns else None,
+        output_folder=output_folder,
+        plotname="xi_sigma_pi_full.png",
+        min_sep=min_sep_2d,
+        max_sep=max_sep_2d,
+        bin_size=bin_size_2d
+    )
 
     print("Splitting galaxies by dist_fil bins")
     bins, labels, _ = split_by_dist_fil_bins(cat_z_mag)
