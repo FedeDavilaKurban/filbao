@@ -56,11 +56,15 @@ bin_size_2d = 2.0
 pi_rebin = 2                # rebin factor for π direction
 
 # ------ dist_fil binning ------
-dist_bin_mode = "tails"
+dist_bin_mode = "percentile_intervals"
 # Options: "percentile", "fixed", "equal_width", "custom_intervals", "tails"
-dist_bin_intervals = [
+dist_bin_intervals = [ # used only for "custom_intervals" mode
     [(0, 2)],
     [(10, 100)],
+]
+dist_bin_percentile_intervals  = [ # used only for "percentile_intervals" mode
+    (0, 20),      # a–bth percentile
+    (70, 90)     # c–dth percentile
 ]
 nbins_dist = 3              # used only for percentile / equal_width
 dist_bin_edges = [0, 5, 30] # used only for "fixed"
@@ -142,7 +146,8 @@ def get_paircounts_filename(bin_name, params):
         f"pi_rebin={params['pi_rebin']}",
         f"nrand={params['nrand_mult']}",
         f"radec={params['ran_radec_method']}",
-        f"bin={bin_name}"
+        f"bin={bin_name}",
+        f"distbinmode={params['dist_bin_mode']}"
     ]
     # Join and replace dots to avoid filesystem issues
     fname = "_".join(parts).replace('.', 'p')
@@ -467,6 +472,19 @@ def split_by_dist_fil_bins(cat_z_mag):
         edges = np.linspace(vmin, vmax, nbins_dist + 1)
     elif dist_bin_mode == "fixed":
         edges = np.array(dist_bin_edges)
+    elif dist_bin_mode == "percentile_intervals":
+        if not hasattr(dist_bin_percentile_intervals, '__iter__'):
+            raise ValueError("dist_bin_percentile_intervals must be a list of (low, high) tuples")
+        bins = []
+        labels = []
+        for (lo_pct, hi_pct) in dist_bin_percentile_intervals:
+            lo_val = np.percentile(values, lo_pct)
+            hi_val = np.percentile(values, hi_pct)
+            mask = (values >= lo_val) & (values <= hi_val)
+            subset = cat_z_mag.loc[mask].copy()
+            bins.append(subset)
+            labels.append(f"$r_{{fil}} \\in [{lo_val:.1f}-{hi_val:.1f}]$ Mpc/h")
+        return bins, labels, None
     else:
         raise ValueError(f"Unknown dist_bin_mode: {dist_bin_mode}")
 
@@ -785,7 +803,7 @@ def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename
     ax.set_ylabel(r'$s^{2}\xi_0(s)$')
     ax.set_title('Monopoles ξ₀(s)')
     ax.axvline(102, color='k', linestyle=':', label='BAO scale')
-    ax.legend()
+    ax.legend(loc='lower left')
     plt.tight_layout()
     
     if output_folder:
@@ -817,6 +835,7 @@ def main():
     - nrand_mult: {nrand_mult}
     - dist_bin_mode: {dist_bin_mode}
     - dist_bin_intervals: {dist_bin_intervals if dist_bin_mode == 'custom_intervals' else 'N/A'}
+    - dist_percentile_intervals: {dist_bin_percentile_intervals if dist_bin_mode == 'percentile_intervals' else 'N/A'}
     """)
 
     # Load catalog and apply cuts
@@ -847,7 +866,7 @@ def main():
     # Split galaxies into dist_fil bins
     bins, labels, _ = split_by_dist_fil_bins(cat_z_mag)
     # Compute mean filament distance for each bin
-    median_distfil = [bin_df['dist_fil'].median() for bin_df in bins]
+    # median_distfil = [bin_df['dist_fil'].median() for bin_df in bins]
 
     # ------------------------------------------------------------
     # NEW: Compute required random counts and generate master RA/Dec
@@ -948,7 +967,8 @@ def main():
         'bin_size_2d': bin_size_2d,
         'pi_rebin': pi_rebin,
         'nrand_mult': nrand_mult,
-        'ran_radec_method': ran_radec_method
+        'ran_radec_method': ran_radec_method,
+        'dist_bin_mode': dist_bin_mode
     }
     paircounts_file_full = get_paircounts_filename("full", params)
 
@@ -1002,7 +1022,7 @@ def main():
             xi_sigma_pi_bin, rp_bins_bin, pi_edges_bin
         )
         monopoles_list.append((s_centers_bin, xi0_bin))
-        labels_list.append(f"{lab} (mean={median_distfil[i]:.1f})")
+        labels_list.append(f"{lab}") #(mean={median_distfil[i]:.1f})")
 
     # Plot all together
     plot_monopoles_combined(monopoles_list, labels_list,
