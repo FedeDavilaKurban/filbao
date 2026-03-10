@@ -1,4 +1,10 @@
 """
+v1.3
+
+- Improved monopole calculation
+- Added option to save/load pair counts to avoid recomputation
+- Added contours to xi(σ, π) plot
+
 v1.2
 
 - Compute and plot monopole 
@@ -34,7 +40,7 @@ from scipy.stats import gaussian_kde
 # ---- Sample ----------
 sample = 'nyu'
 test_dilute = 1                     # fraction of galaxies to keep (1.0 = full)
-sigma = 3.0
+sigma = 5.0
 h = 0.6774
 zmin, zmax = 0.07, 0.2
 mag_max = -21.2
@@ -50,8 +56,8 @@ bin_size_2d = 2.0
 pi_rebin = 2                # rebin factor for π direction
 
 # ------ dist_fil binning ------
-dist_bin_mode = "custom_intervals"
-# Options: "percentile", "fixed", "equal_width", "custom_intervals"
+dist_bin_mode = "tails"
+# Options: "percentile", "fixed", "equal_width", "custom_intervals", "tails"
 dist_bin_intervals = [
     [(0, 2)],
     [(10, 100)],
@@ -76,6 +82,10 @@ output_folder = f"../plots/{folderName}/"
 if os.path.exists(output_folder):
     shutil.rmtree(output_folder)
 os.makedirs(output_folder)
+
+# ------ Pair counts folder ----
+paircounts_dir = "../data/pair_counts/"
+os.makedirs(paircounts_dir, exist_ok=True)
 
 # ---------------------------
 # COSMOLOGY
@@ -110,6 +120,33 @@ def save_figure(fig, path: str, dpi: int = 300):
     ensure_dir_exists(path)
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
+
+def get_paircounts_filename(bin_name, params):
+    """
+    Generate a filename for saved pair counts based on key parameters.
+    params should be a dict containing at least:
+        sample, sigma, h, zmin, zmax, mag_max, gr_min,
+        min_sep_2d, max_sep_2d, bin_size_2d, pi_rebin,
+        nrand_mult, ran_radec_method, and the bin identifier (bin_name).
+    """
+    # Create a string with all relevant values
+    parts = [
+        f"sample={params['sample']}",
+        f"sigma={params['sigma']}",
+        f"h={params['h']:.4f}",
+        f"z={params['zmin']:.2f}-{params['zmax']:.2f}",
+        f"mag={params['mag_max']:.1f}",
+        f"gr={params['gr_min']:.1f}",
+        f"sep={params['min_sep_2d']}-{params['max_sep_2d']}",
+        f"bin={params['bin_size_2d']}",
+        f"pi_rebin={params['pi_rebin']}",
+        f"nrand={params['nrand_mult']}",
+        f"radec={params['ran_radec_method']}",
+        f"bin={bin_name}"
+    ]
+    # Join and replace dots to avoid filesystem issues
+    fname = "_".join(parts).replace('.', 'p')
+    return os.path.join(paircounts_dir, fname + ".npz")
 
 # ---------------------------
 # REDSHIFT DISTRIBUTION FITTING
@@ -337,7 +374,7 @@ def plot_radec_distribution(cat, randoms, subsample=None):
         axtitle = 'Total sample'
     else:
         filename = f"../plots/{folderName}/radec_distribution_bin{subsample}.png"
-        axtitle = f"Bin {subsample}"
+        axtitle = rf"r_{'fil'} \in {cat['dist_fil'].min():.1f}-{cat['dist_fil'].max():.1f} Mpc/h"
     fig.suptitle(axtitle)
     plt.tight_layout()
     save_figure(fig, filename, dpi=100)
@@ -452,112 +489,198 @@ def split_by_dist_fil_bins(cat_z_mag):
 # ---------------------------
 # Updated xi_sigmapi_package
 # ---------------------------
+from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import SymLogNorm
+
 def xi_sigmapi_package(ra_data, dec_data, chi_data,
                        ra_rand, dec_rand, chi_rand,
-                       pi_rebin,
+                       pi_rebin, title=None,
                        data_weights=None, rand_weights=None,
                        output_folder=None, plotname="xi_sigma_pi.png",
-                       min_sep=0.0, max_sep=50.0, bin_size=2.0):
+                       min_sep=0.0, max_sep=50.0, bin_size=2.0,
+                       paircounts_file=None, force_recompute=False):
     """
     Compute ξ(σ, π) using Corrfunc, save a plot, and return xi array + sigma bin edges.
+    If paircounts_file is provided and exists, load precomputed pair counts instead of recomputing.
     """
     import numpy as np
     import matplotlib.pyplot as plt
     import multiprocessing
+    from matplotlib.colors import TwoSlopeNorm
     try:
         from Corrfunc.theory.DDrppi import DDrppi
     except ImportError:
         raise ImportError("Corrfunc is not installed. Please run: conda install -c conda-forge corrfunc")
 
-    def sph2cart(ra, dec, chi):
-        x = chi * np.cos(np.radians(dec)) * np.cos(np.radians(ra))
-        y = chi * np.cos(np.radians(dec)) * np.sin(np.radians(ra))
-        z = chi * np.sin(np.radians(dec))
-        return x, y, z
+    # ------------------------------------------------------------
+    # Try to load precomputed pair counts
+    # ------------------------------------------------------------
+    if paircounts_file and os.path.exists(paircounts_file) and not force_recompute:
+        print(f"Loading precomputed pair counts from {paircounts_file}")
+        data = np.load(paircounts_file)
+        rp_bins = data['rp_bins']
+        pi_rebin = data['pi_rebin']
+        max_pimax = data['max_pimax']
+        H_dd_rebinned = data['H_dd_rebinned']
+        H_dr_rebinned = data['H_dr_rebinned']
+        H_rr_rebinned = data['H_rr_rebinned']
+        WD = data['WD']
+        WR = data['WR']
+        WD2 = data['WD2']
+        WR2 = data['WR2']
+        # Compute norms
+        norm_DD = WD*WD - WD2
+        norm_RR = WR*WR - WR2
+        norm_DR = WD*WR
+        DD = H_dd_rebinned / norm_DD
+        RR = H_rr_rebinned / norm_RR
+        DR = H_dr_rebinned / norm_DR
+        with np.errstate(divide='ignore', invalid='ignore'):
+            xi = (DD - 2*DR + RR) / RR
+            xi[RR == 0] = 0
+        # Proceed to plotting (skip recomputation)
+    else:
+        # ------------------------------------------------------------
+        # Compute from scratch
+        # ------------------------------------------------------------
+        def sph2cart(ra, dec, chi):
+            x = chi * np.cos(np.radians(dec)) * np.cos(np.radians(ra))
+            y = chi * np.cos(np.radians(dec)) * np.sin(np.radians(ra))
+            z = chi * np.sin(np.radians(dec))
+            return x, y, z
 
-    x_data, y_data, z_data = sph2cart(ra_data, dec_data, chi_data)
-    x_rand, y_rand, z_rand = sph2cart(ra_rand, dec_rand, chi_rand)
+        x_data, y_data, z_data = sph2cart(ra_data, dec_data, chi_data)
+        x_rand, y_rand, z_rand = sph2cart(ra_rand, dec_rand, chi_rand)
 
-    # If weights are not provided, assign unit weights
-    if data_weights is None:
-        data_weights = np.ones(len(x_data))
+        if data_weights is None:
+            data_weights = np.ones(len(x_data))
+        if rand_weights is None:
+            rand_weights = np.ones(len(x_rand))
 
-    if rand_weights is None:
-        rand_weights = np.ones(len(x_rand))
+        nbins = int((max_sep - min_sep) / bin_size)
+        rp_bins = np.linspace(min_sep, max_sep, nbins + 1)
+        pimax = int(max_sep)
+        nthreads = multiprocessing.cpu_count()
 
-    # Define bins
-    nbins = int((max_sep - min_sep) / bin_size)
-    rp_bins = np.linspace(min_sep, max_sep, nbins + 1)
-    pimax = int(max_sep)
-    nthreads = multiprocessing.cpu_count()
+        dd_counts = DDrppi(1, nthreads, pimax, rp_bins,
+                           x_data, y_data, z_data,
+                           weights1=data_weights,
+                           weight_type='pair_product',
+                           periodic=False, verbose=False)
+        H_dd = (dd_counts['npairs'] * dd_counts['weightavg']).reshape(nbins, pimax)
 
-    # Data-Data
-    dd_counts = DDrppi(1, nthreads, pimax, rp_bins,
-                       x_data, y_data, z_data,
-                       weights1=data_weights,
-                       weight_type='pair_product',
-                       periodic=False, verbose=False)
-    H_dd = (dd_counts['npairs'] * dd_counts['weightavg']).reshape(nbins, pimax)
+        rr_counts = DDrppi(1, nthreads, pimax, rp_bins,
+                           x_rand, y_rand, z_rand,
+                           weights1=rand_weights,
+                           weight_type='pair_product',
+                           periodic=False, verbose=False)
+        H_rr = (rr_counts['npairs'] * rr_counts['weightavg']).reshape(nbins, pimax)
 
-    # Random-Random
-    rr_counts = DDrppi(1, nthreads, pimax, rp_bins,
-                       x_rand, y_rand, z_rand,
-                       weights1=rand_weights,
-                       weight_type='pair_product',
-                       periodic=False, verbose=False)
-    H_rr = (rr_counts['npairs'] * rr_counts['weightavg']).reshape(nbins, pimax)
+        dr_counts = DDrppi(0, nthreads, pimax, rp_bins,
+                           x_data, y_data, z_data,
+                           X2=x_rand, Y2=y_rand, Z2=z_rand,
+                           weights1=data_weights,
+                           weights2=rand_weights,
+                           weight_type='pair_product',
+                           periodic=False, verbose=False)
+        H_dr = (dr_counts['npairs'] * dr_counts['weightavg']).reshape(nbins, pimax)
 
-    # Data-Random
-    dr_counts = DDrppi(0, nthreads, pimax, rp_bins,
-                       x_data, y_data, z_data,
-                       X2=x_rand, Y2=y_rand, Z2=z_rand,
-                       weights1=data_weights,
-                       weights2=rand_weights,
-                       weight_type='pair_product',
-                       periodic=False, verbose=False)
-    H_dr = (dr_counts['npairs'] * dr_counts['weightavg']).reshape(nbins, pimax)
+        max_pimax = (pimax // pi_rebin) * pi_rebin
+        H_dd_rebinned = H_dd[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
+        H_dr_rebinned = H_dr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
+        H_rr_rebinned = H_rr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
 
-    # Rebining in π
-    max_pimax = (pimax // pi_rebin) * pi_rebin  # truncate to multiple of pi_rebin
-    H_dd_rebinned = H_dd[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
-    H_rr_rebinned = H_rr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
-    H_dr_rebinned = H_dr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
+        print("DD sum:", np.sum(H_dd_rebinned))
+        print("DR sum:", np.sum(H_dr_rebinned))
+        print("RR sum:", np.sum(H_rr_rebinned))
 
-    print("DD sum:", np.sum(H_dd_rebinned))
-    print("DR sum:", np.sum(H_dr_rebinned))
-    print("RR sum:", np.sum(H_rr_rebinned))
+        WD = np.sum(data_weights)
+        WR = np.sum(rand_weights)
+        WD2 = np.sum(data_weights**2)
+        WR2 = np.sum(rand_weights**2)
 
-    # Sum of weights
-    WD = np.sum(data_weights) 
-    WR = np.sum(rand_weights)
+        norm_DD = WD*WD - WD2
+        norm_RR = WR*WR - WR2
+        norm_DR = WD*WR
 
-    # Sum of squared weights
-    WD2 = np.sum(data_weights**2) 
-    WR2 = np.sum(rand_weights**2)
+        DD = H_dd_rebinned / norm_DD
+        RR = H_rr_rebinned / norm_RR
+        DR = H_dr_rebinned / norm_DR
 
-    # Proper pair normalizations
-    norm_DD = WD*WD - WD2
-    norm_RR = WR*WR - WR2
-    norm_DR = WD*WR
+        with np.errstate(divide='ignore', invalid='ignore'):
+            xi = (DD - 2*DR + RR) / RR
+            xi[RR == 0] = 0
 
-    DD = H_dd_rebinned / norm_DD
-    RR = H_rr_rebinned / norm_RR
-    DR = H_dr_rebinned / norm_DR
+        # Save pair counts if requested
+        if paircounts_file:
+            print(f"Saving pair counts to {paircounts_file}")
+            os.makedirs(os.path.dirname(paircounts_file), exist_ok=True)
+            np.savez(paircounts_file,
+                     rp_bins=rp_bins,
+                     pi_rebin=pi_rebin,
+                     max_pimax=max_pimax,
+                     H_dd_rebinned=H_dd_rebinned,
+                     H_dr_rebinned=H_dr_rebinned,
+                     H_rr_rebinned=H_rr_rebinned,
+                     WD=WD, WR=WR, WD2=WD2, WR2=WR2)
 
-    # Landy‑Szalay estimator
-    with np.errstate(divide='ignore', invalid='ignore'):
-        xi = (DD - 2*DR + RR) / RR
-        xi[RR == 0] = 0 
-        
-    # Plot ξ(σ, π)
+    # ------------------------------------------------------------
+    # Plotting (common for both loaded and computed)
+    # ------------------------------------------------------------
+    pi_edges_rebinned = np.arange(0, max_pimax + pi_rebin, pi_rebin)
+    sigma_edges = rp_bins
+    pi_edges = pi_edges_rebinned
+    X, Y = np.meshgrid(sigma_edges, pi_edges)
+    C = xi.T
+
+    # vmin = np.percentile(xi, 1)
+    # vmax = np.percentile(xi, 99)
+    # if vmin >= 0:
+    #     vmin = -vmax / 2
+    # if vmax <= 0:
+    #     vmax = -vmin / 2
+    # norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+
+
+    # Choose a linear threshold around zero (e.g., 0.01)
+    linthresh = 0.001
+    vmin = np.percentile(xi, 1)
+    vmax = np.percentile(xi, 99)
+    # Ensure vmin < 0 and vmax > 0 (or adjust)
+    if vmin >= 0:
+        vmin = -vmax / 2
+    if vmax <= 0:
+        vmax = -vmin / 2
+
+    norm = SymLogNorm(linthresh=linthresh, linscale=1.0, vmin=vmin, vmax=vmax)
+    # A diverging colormap works well with SymLogNorm
+    #cmap = 'RdBu_r'
+
     fig, ax = plt.subplots(figsize=(7, 6))
-    extent = [rp_bins[0], rp_bins[-1], rp_bins[0], rp_bins[-1]]
-    im = ax.imshow(xi.T, origin='lower', extent=extent, aspect='auto', cmap='Blues')
+    im = ax.pcolormesh(X, Y, C, shading='flat', cmap='plasma', norm=norm)
     ax.set_xlabel(r'$\sigma$ [$h^{-1}$ Mpc]')
     ax.set_ylabel(r'$\pi$ [$h^{-1}$ Mpc]')
-    ax.set_title(r'$\xi(\sigma,\pi)$')
+    ax.set_title(title if title else r'$\xi(\sigma, \pi)$')
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(r'$\xi(\sigma,\pi)$')
+
+    # Contours
+    sigma_centers = 0.5 * (sigma_edges[:-1] + sigma_edges[1:])
+    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
+    Xc, Yc = np.meshgrid(sigma_centers, pi_centers)   # shape (n_pi, n_sigma)
+
+    # Mask for BAO region (both σ and π between 50 and 150)
+    mask_region = (Xc >= 50) & (Xc <= 150) & (Yc >= 50) & (Yc <= 150)
+    values_region = C[mask_region]
+
+    # Compute percentile levels
+    levels = np.percentile(values_region, [50, 70, 90])
+
+    # Plot contours
+    ax.contour(Xc, Yc, C, levels=levels, colors='k', linewidths=1.5)
+
+    ax.set_xlim(left=min_sep)
+    ax.set_ylim(bottom=min_sep)
 
     if output_folder:
         os.makedirs(output_folder, exist_ok=True)
@@ -573,24 +696,69 @@ def xi_sigmapi_package(ra_data, dec_data, chi_data,
 # ---------------------------
 # Monopole functions
 # ---------------------------
-def compute_monopole(xi_sigma_pi, rp_bins, pi_bin_size):
-    sigma_centers = 0.5 * (rp_bins[:-1] + rp_bins[1:])
-    nbins_sigma, nbins_pi = xi_sigma_pi.shape
-    # Build s grid
-    pi_centers = (np.arange(nbins_pi) + 0.5) * pi_bin_size    
-    sigma_grid, pi_grid = np.meshgrid(sigma_centers, pi_centers, indexing='ij')
-    s_grid = np.sqrt(sigma_grid**2 + pi_grid**2)
-    xi_flat = xi_sigma_pi.flatten()
-    s_flat = s_grid.flatten()
-    # Bin s for monopole
-    s_bins = np.linspace(rp_bins[0], np.sqrt(2)*rp_bins[-1], 50)  # more bins    
-    s_centers = 0.5 * (s_bins[:-1] + s_bins[1:])
-    xi0 = np.zeros(len(s_centers))
-    for i in range(len(s_centers)):
-        mask = (s_flat >= s_bins[i]) & (s_flat < s_bins[i+1])
-        xi0[i] = np.mean(xi_flat[mask]) if np.sum(mask) > 0 else 0.0
-    return s_centers, xi0
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 
+def compute_monopole(xi, sigma_edges, pi_edges, s_bins=None):
+    """
+    Compute monopole ξ0(s) from ξ(σ,π) on a regular grid.
+
+    Parameters
+    ----------
+    xi : 2D array, shape (n_sigma, n_pi)
+        ξ(σ,π) values at the centers of the cells.
+    sigma_edges : 1D array, length n_sigma+1
+        Edges of the σ bins.
+    pi_edges : 1D array, length n_pi+1
+        Edges of the π bins.
+    s_bins : 1D array, optional
+        Edges of the output s bins. If None, uses σ edges up to π_max.
+
+    Returns
+    -------
+    s_centers : 1D array
+        Centers of the s bins.
+    xi0 : 1D array
+        Monopole ξ0(s) at each s center.
+    """
+    sigma_centers = 0.5 * (sigma_edges[:-1] + sigma_edges[1:])
+    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
+
+    # Interpolator for ξ(σ,π). Values outside the grid are set to 0.
+    interp = RegularGridInterpolator(
+        (sigma_centers, pi_centers), xi,
+        bounds_error=False, fill_value=0.0
+    )
+
+    # Define output s bins
+    if s_bins is None:
+        max_s = pi_edges[-1]          # cannot integrate beyond the maximum π
+        s_bins = sigma_edges[sigma_edges <= max_s]
+        if s_bins[-1] < max_s:
+            s_bins = np.append(s_bins, max_s)
+    s_centers = 0.5 * (s_bins[:-1] + s_bins[1:])
+
+    xi0 = np.zeros_like(s_centers)
+
+    for i, s in enumerate(s_centers):
+        π_max = min(s, pi_edges[-1])
+        if π_max <= 0:
+            xi0[i] = 0.0
+            continue
+
+        # Fine grid for the integration over π
+        n_int = 100
+        π_vals = np.linspace(0, π_max, n_int)
+        σ_vals = np.sqrt(s**2 - π_vals**2)
+
+        points = np.column_stack((σ_vals, π_vals))
+        ξ_vals = interp(points)
+
+        # Integral over π → monopole
+        integral = np.trapz(ξ_vals, π_vals)
+        xi0[i] = integral / s
+
+    return s_centers, xi0
 
 def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename='xi0_combined.png'):
     """
@@ -615,7 +783,8 @@ def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename
     #ax.axhline(0, color='k', linestyle='--')
     ax.set_xlabel(r'$s\,[h^{-1}\mathrm{Mpc}]$')
     ax.set_ylabel(r'$s^{2}\xi_0(s)$')
-    ax.set_title('Monopoles ξ₀(s) – Full Sample + dist_fil bins')
+    ax.set_title('Monopoles ξ₀(s)')
+    ax.axvline(102, color='k', linestyle=':', label='BAO scale')
     ax.legend()
     plt.tight_layout()
     
@@ -677,6 +846,8 @@ def main():
 
     # Split galaxies into dist_fil bins
     bins, labels, _ = split_by_dist_fil_bins(cat_z_mag)
+    # Compute mean filament distance for each bin
+    median_distfil = [bin_df['dist_fil'].median() for bin_df in bins]
 
     # ------------------------------------------------------------
     # NEW: Compute required random counts and generate master RA/Dec
@@ -764,39 +935,74 @@ def main():
     # ------------------------------------------------------------
     print("\nComputing ξ(σ, π) for full sample...")
     # Full sample
+    params = {
+        'sample': sample,
+        'sigma': sigma,
+        'h': h,
+        'zmin': zmin,
+        'zmax': zmax,
+        'mag_max': mag_max,
+        'gr_min': gr_min,
+        'min_sep_2d': min_sep_2d,
+        'max_sep_2d': max_sep_2d,
+        'bin_size_2d': bin_size_2d,
+        'pi_rebin': pi_rebin,
+        'nrand_mult': nrand_mult,
+        'ran_radec_method': ran_radec_method
+    }
+    paircounts_file_full = get_paircounts_filename("full", params)
+
     xi_sigma_pi_full, rp_bins = xi_sigmapi_package(
         cat_z_mag["ra"].values, cat_z_mag["dec"].values, cat_z_mag["r"].values,
         random_full["ra"].values, random_full["dec"].values, random_full["r"].values,
-        pi_rebin,
+        pi_rebin, title=rf"$\xi(\sigma, \pi)$ Full Sample",
         data_weights=None,
         rand_weights=random_full["weight"].values,
         output_folder=output_folder,
         plotname="xi_sigma_pi_full.png",
-        min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d
+        min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
+        paircounts_file=paircounts_file_full,
+        force_recompute=False   # set to True to override
     )
 
     monopoles_list = []
 
     # Full sample
-    s_centers, xi0_full = compute_monopole(xi_sigma_pi_full, rp_bins, bin_size_2d * pi_rebin)
+    # Build π edges from the rebinned bin size
+    n_pi = xi_sigma_pi_full.shape[1]
+    pi_edges = np.arange(n_pi + 1) * pi_rebin          # step = pi_rebin
+    s_centers, xi0_full = compute_monopole(
+        xi_sigma_pi_full, rp_bins, pi_edges
+    )
     monopoles_list.append((s_centers, xi0_full))
     labels_list = ['Full Sample']
 
     # Each dist_fil bin
     for i, (gxs, rxs, lab) in enumerate(zip(bins, randoms_bins_list, labels)):
+        params_bin = params.copy()
+        paircounts_file_bin = get_paircounts_filename(f"bin{i}", params_bin)
+
         xi_sigma_pi_bin, rp_bins_bin = xi_sigmapi_package(
             gxs["ra"].values, gxs["dec"].values, gxs["r"].values,
             rxs["ra"].values, rxs["dec"].values, rxs["r"].values,
-            pi_rebin,
+            pi_rebin, title=rf"$\xi(\sigma, \pi)$ {lab}",
             data_weights=gxs["weight"].values,
             rand_weights=rxs["weight"].values,
             output_folder=output_folder,
             plotname=f"xi_sigma_pi_bin{i}.png",
-            min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d
+            min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
+            paircounts_file=paircounts_file_bin,
+            force_recompute=False
         )
-        s_centers_bin, xi0_bin = compute_monopole(xi_sigma_pi_bin, rp_bins_bin, bin_size_2d * pi_rebin)
+        # Build π edges from the rebinned bin size
+        # Compute monopole for this bin
+        n_pi_bin = xi_sigma_pi_bin.shape[1]
+        pi_edges_bin = np.arange(n_pi_bin + 1) * pi_rebin
+        s_centers_bin, xi0_bin = compute_monopole(
+            xi_sigma_pi_bin, rp_bins_bin, pi_edges_bin
+        )
         monopoles_list.append((s_centers_bin, xi0_bin))
-        labels_list.append(lab)
+        labels_list.append(f"{lab} (mean={median_distfil[i]:.1f})")
 
     # Plot all together
     plot_monopoles_combined(monopoles_list, labels_list,
