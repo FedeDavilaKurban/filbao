@@ -4,6 +4,9 @@ v1.3
 - Improved monopole calculation
 - Added option to save/load pair counts to avoid recomputation
 - Added contours to xi(σ, π) plot
+- Added dist_bin_mode "percentile_intervals" for flexible percentile-based binning
+- Redshift distribution for subsamples are now drawn from the full sample instead of the subsample itself, avoiding the subsequent necessary redshift weighting
+(apply_redshift_weights_spline is deleted)
 
 v1.2
 
@@ -25,7 +28,7 @@ from typing import Tuple, Optional
 import numpy as np
 import pandas as pd
 import healpy as hp
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt 
 from scipy.interpolate import interp1d, UnivariateSpline
 from scipy.optimize import curve_fit
 from numpy.polynomial.polynomial import Polynomial
@@ -37,17 +40,20 @@ from scipy.stats import gaussian_kde
 # PARAMETERS
 # ---------------------------
 
+force_recompute_full = False
+force_recompute_bin = False
+
 # ---- Sample ----------
 sample = 'nyu'
 test_dilute = 1                     # fraction of galaxies to keep (1.0 = full)
-sigma = 5.0
+sigma = 3.0
 h = 0.6774
 zmin, zmax = 0.07, 0.2
 mag_max = -21.2
 ran_method = 'random_choice'           # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
     deg = 5
-gr_min = 0.8
+gr_min = 0
 
 # ------ 2D correlation function parameters ------
 min_sep_2d = 1.0          # minimum σ, π in Mpc/h
@@ -56,7 +62,7 @@ bin_size_2d = 2.0
 pi_rebin = 2                # rebin factor for π direction
 
 # ------ dist_fil binning ------
-dist_bin_mode = "percentile_intervals"
+dist_bin_mode = "custom_intervals"
 # Options: "percentile", "fixed", "equal_width", "custom_intervals", "tails"
 dist_bin_intervals = [ # used only for "custom_intervals" mode
     [(0, 2)],
@@ -66,8 +72,8 @@ dist_bin_percentile_intervals  = [ # used only for "percentile_intervals" mode
     (0, 20),      # a–bth percentile
     (70, 90)     # c–dth percentile
 ]
-nbins_dist = 3              # used only for percentile / equal_width
-dist_bin_edges = [0, 5, 30] # used only for "fixed"
+nbins_dist = 4             # used only for percentile / equal_width
+dist_bin_edges = [0, 5, 10, 15, 100] # used only for "fixed"
 
 # ------ Random catalog parameters ------
 nside = 256
@@ -105,15 +111,6 @@ def safe_trapz(y: np.ndarray, x: np.ndarray) -> float:
         return np.trapezoid(y, x)
     except AttributeError:
         return np.trapz(y, x)
-
-def spherical_to_cartesian(ra, dec, r):
-    ra_rad = np.deg2rad(ra)
-    dec_rad = np.deg2rad(dec)
-    cos_dec = np.cos(dec_rad)
-    x = r * cos_dec * np.cos(ra_rad)
-    y = r * cos_dec * np.sin(ra_rad)
-    z = r * np.sin(dec_rad)
-    return x, y, z
 
 def ensure_dir_exists(path: str) -> None:
     d = os.path.dirname(path)
@@ -254,31 +251,6 @@ def compute_dec_weights(data_dec, rand_dec, alpha=1.0, method="auto",
     weights /= np.mean(weights)
     return weights
 
-def apply_redshift_weights_spline(bin_galaxies, rand_catalog, target_kde, dec_weights):
-    """
-    Compute redshift weights using a spline ratio method and assign them to
-    both the galaxy and random catalogs (in‑place).
-    """
-    z_bin = bin_galaxies["red"].values
-    n_bins_z = 40
-    hist_bin, bin_edges = np.histogram(z_bin, bins=n_bins_z, density=False)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    target_counts = target_kde(bin_centers) * len(z_bin) * (bin_edges[1] - bin_edges[0])
-    eps = 1e-10
-    ratio = (target_counts + eps) / (hist_bin + eps)
-    spline_ratio = UnivariateSpline(bin_centers, ratio, s=0.5, ext='const')
-    gal_weight_raw = spline_ratio(z_bin)
-    gal_weight_raw = np.clip(gal_weight_raw, 0.1, 10.0)
-    gal_weight = gal_weight_raw / np.mean(gal_weight_raw)
-    bin_galaxies.loc[:, "weight"] = gal_weight
-
-    rand_z = rand_catalog["red"].values
-    rand_z_weight_raw = spline_ratio(rand_z)
-    rand_z_weight_raw = np.clip(rand_z_weight_raw, 0.1, 10.0)
-    combined_raw = rand_z_weight_raw * dec_weights
-    combined = combined_raw / np.mean(combined_raw)
-    rand_catalog["weight"] = combined
-
 # ---------------------------
 # RA/DEC GENERATION FUNCTIONS
 # ---------------------------
@@ -397,9 +369,9 @@ def plot_bin_data_and_randoms(gxs, rxs, label, plotname):
                  color="C00", alpha=0.8, label="Galaxies (unweighted)")
     axes[1].hist(rxs["red"], bins=40, density=True, histtype="step",
                  color="k", lw=1.5, label="Randoms")
-    if "weight" in rxs.columns:
-        axes[1].hist(rxs["red"], bins=40, density=True, weights=rxs["weight"],
-                     histtype="step", color="k", linestyle="--", lw=1.5, label="Randoms (weighted)")
+    # if "weight" in rxs.columns:
+    #     axes[1].hist(rxs["red"], bins=40, density=True, weights=rxs["weight"],
+    #                  histtype="step", color="k", linestyle="--", lw=1.5, label="Randoms (weighted)")
     if "weight" in gxs.columns:
         axes[1].hist(gxs["red"], bins=40, density=True, weights=gxs["weight"],
                      histtype="step", color="C00", linestyle="--", lw=2,
@@ -510,29 +482,38 @@ def split_by_dist_fil_bins(cat_z_mag):
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.colors import SymLogNorm
 
-def xi_sigmapi_package(ra_data, dec_data, chi_data,
+def compute_xi_sigmapi(ra_data, dec_data, chi_data,
                        ra_rand, dec_rand, chi_rand,
-                       pi_rebin, title=None,
+                       pi_rebin,
                        data_weights=None, rand_weights=None,
-                       output_folder=None, plotname="xi_sigma_pi.png",
                        min_sep=0.0, max_sep=50.0, bin_size=2.0,
                        paircounts_file=None, force_recompute=False):
     """
-    Compute ξ(σ, π) using Corrfunc, save a plot, and return xi array + sigma bin edges.
-    If paircounts_file is provided and exists, load precomputed pair counts instead of recomputing.
+    Compute ξ(σ, π) using Corrfunc and return xi, sigma edges, and π edges.
+    If paircounts_file exists, load precomputed counts instead of recomputing.
     """
     import numpy as np
-    import matplotlib.pyplot as plt
     import multiprocessing
-    from matplotlib.colors import TwoSlopeNorm
     try:
         from Corrfunc.theory.DDrppi import DDrppi
     except ImportError:
         raise ImportError("Corrfunc is not installed. Please run: conda install -c conda-forge corrfunc")
 
-    # ------------------------------------------------------------
+    def sph2cart(ra, dec, chi):
+        x = chi * np.cos(np.radians(dec)) * np.cos(np.radians(ra))
+        y = chi * np.cos(np.radians(dec)) * np.sin(np.radians(ra))
+        z = chi * np.sin(np.radians(dec))
+        return x, y, z
+
+    x_data, y_data, z_data = sph2cart(ra_data, dec_data, chi_data)
+    x_rand, y_rand, z_rand = sph2cart(ra_rand, dec_rand, chi_rand)
+
+    if data_weights is None:
+        data_weights = np.ones(len(x_data))
+    if rand_weights is None:
+        rand_weights = np.ones(len(x_rand))
+
     # Try to load precomputed pair counts
-    # ------------------------------------------------------------
     if paircounts_file and os.path.exists(paircounts_file) and not force_recompute:
         print(f"Loading precomputed pair counts from {paircounts_file}")
         data = np.load(paircounts_file)
@@ -546,39 +527,12 @@ def xi_sigmapi_package(ra_data, dec_data, chi_data,
         WR = data['WR']
         WD2 = data['WD2']
         WR2 = data['WR2']
-        # Compute norms
-        norm_DD = WD*WD - WD2
-        norm_RR = WR*WR - WR2
-        norm_DR = WD*WR
-        DD = H_dd_rebinned / norm_DD
-        RR = H_rr_rebinned / norm_RR
-        DR = H_dr_rebinned / norm_DR
-        with np.errstate(divide='ignore', invalid='ignore'):
-            xi = (DD - 2*DR + RR) / RR
-            xi[RR == 0] = 0
-        # Proceed to plotting (skip recomputation)
     else:
-        # ------------------------------------------------------------
         # Compute from scratch
-        # ------------------------------------------------------------
-        def sph2cart(ra, dec, chi):
-            x = chi * np.cos(np.radians(dec)) * np.cos(np.radians(ra))
-            y = chi * np.cos(np.radians(dec)) * np.sin(np.radians(ra))
-            z = chi * np.sin(np.radians(dec))
-            return x, y, z
-
-        x_data, y_data, z_data = sph2cart(ra_data, dec_data, chi_data)
-        x_rand, y_rand, z_rand = sph2cart(ra_rand, dec_rand, chi_rand)
-
-        if data_weights is None:
-            data_weights = np.ones(len(x_data))
-        if rand_weights is None:
-            rand_weights = np.ones(len(x_rand))
-
         nbins = int((max_sep - min_sep) / bin_size)
         rp_bins = np.linspace(min_sep, max_sep, nbins + 1)
         pimax = int(max_sep)
-        nthreads = multiprocessing.cpu_count()
+        nthreads = min(multiprocessing.cpu_count(), 16)
 
         dd_counts = DDrppi(1, nthreads, pimax, rp_bins,
                            x_data, y_data, z_data,
@@ -608,28 +562,11 @@ def xi_sigmapi_package(ra_data, dec_data, chi_data,
         H_dr_rebinned = H_dr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
         H_rr_rebinned = H_rr[:, :max_pimax].reshape(nbins, max_pimax // pi_rebin, pi_rebin).sum(axis=2)
 
-        print("DD sum:", np.sum(H_dd_rebinned))
-        print("DR sum:", np.sum(H_dr_rebinned))
-        print("RR sum:", np.sum(H_rr_rebinned))
-
         WD = np.sum(data_weights)
         WR = np.sum(rand_weights)
         WD2 = np.sum(data_weights**2)
         WR2 = np.sum(rand_weights**2)
 
-        norm_DD = WD*WD - WD2
-        norm_RR = WR*WR - WR2
-        norm_DR = WD*WR
-
-        DD = H_dd_rebinned / norm_DD
-        RR = H_rr_rebinned / norm_RR
-        DR = H_dr_rebinned / norm_DR
-
-        with np.errstate(divide='ignore', invalid='ignore'):
-            xi = (DD - 2*DR + RR) / RR
-            xi[RR == 0] = 0
-
-        # Save pair counts if requested
         if paircounts_file:
             print(f"Saving pair counts to {paircounts_file}")
             os.makedirs(os.path.dirname(paircounts_file), exist_ok=True)
@@ -642,37 +579,51 @@ def xi_sigmapi_package(ra_data, dec_data, chi_data,
                      H_rr_rebinned=H_rr_rebinned,
                      WD=WD, WR=WR, WD2=WD2, WR2=WR2)
 
-    # ------------------------------------------------------------
-    # Plotting (common for both loaded and computed)
-    # ------------------------------------------------------------
+    # Normalize to get xi
+    norm_DD = WD*WD - WD2
+    norm_RR = WR*WR - WR2
+    norm_DR = WD*WR
+
+    DD = H_dd_rebinned / norm_DD
+    RR = H_rr_rebinned / norm_RR
+    DR = H_dr_rebinned / norm_DR
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        xi = (DD - 2*DR + RR) / RR
+        xi[RR == 0] = 0
+
+    # Return xi, sigma edges, and max_pimax (needed for π edges)
+    return xi, rp_bins, max_pimax
+
+def plot_xi_sigmapi(xi, sigma_edges, max_pimax, pi_rebin,
+                    title=None, output_folder=None, plotname="xi_sigma_pi.png",
+                    min_sep=0.0, vmin_global=None, vmax_global=None):
+    """
+    Plot ξ(σ, π) using a precomputed xi array.
+    If vmin_global and vmax_global are provided, they fix the color scale.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import SymLogNorm
+
     pi_edges_rebinned = np.arange(0, max_pimax + pi_rebin, pi_rebin)
-    sigma_edges = rp_bins
-    pi_edges = pi_edges_rebinned
-    X, Y = np.meshgrid(sigma_edges, pi_edges)
+    X, Y = np.meshgrid(sigma_edges, pi_edges_rebinned)
     C = xi.T
 
-    # vmin = np.percentile(xi, 1)
-    # vmax = np.percentile(xi, 99)
-    # if vmin >= 0:
-    #     vmin = -vmax / 2
-    # if vmax <= 0:
-    #     vmax = -vmin / 2
-    # norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
-
-
-    # Choose a linear threshold around zero (e.g., 0.01)
+    # Determine color limits
     linthresh = 0.001
-    vmin = np.percentile(xi, 1)
-    vmax = np.percentile(xi, 99)
-    # Ensure vmin < 0 and vmax > 0 (or adjust)
-    if vmin >= 0:
-        vmin = -vmax / 2
-    if vmax <= 0:
-        vmax = -vmin / 2
+    if vmin_global is not None and vmax_global is not None:
+        vmin = vmin_global
+        vmax = vmax_global
+    else:
+        vmin = np.percentile(xi, 1)
+        vmax = np.percentile(xi, 99)
+        if vmin >= 0:
+            vmin = -vmax / 2
+        if vmax <= 0:
+            vmax = -vmin / 2
 
     norm = SymLogNorm(linthresh=linthresh, linscale=1.0, vmin=vmin, vmax=vmax)
-    # A diverging colormap works well with SymLogNorm
-    #cmap = 'RdBu_r'
 
     fig, ax = plt.subplots(figsize=(7, 6))
     im = ax.pcolormesh(X, Y, C, shading='flat', cmap='plasma', norm=norm)
@@ -682,20 +633,15 @@ def xi_sigmapi_package(ra_data, dec_data, chi_data,
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(r'$\xi(\sigma,\pi)$')
 
-    # Contours
+    # Contours (optional – you can keep or remove)
     sigma_centers = 0.5 * (sigma_edges[:-1] + sigma_edges[1:])
-    pi_centers = 0.5 * (pi_edges[:-1] + pi_edges[1:])
-    Xc, Yc = np.meshgrid(sigma_centers, pi_centers)   # shape (n_pi, n_sigma)
-
-    # Mask for BAO region (both σ and π between 50 and 150)
+    pi_centers = 0.5 * (pi_edges_rebinned[:-1] + pi_edges_rebinned[1:])
+    Xc, Yc = np.meshgrid(sigma_centers, pi_centers)
     mask_region = (Xc >= 50) & (Xc <= 150) & (Yc >= 50) & (Yc <= 150)
     values_region = C[mask_region]
-
-    # Compute percentile levels
-    levels = np.percentile(values_region, [50, 70, 90])
-
-    # Plot contours
-    ax.contour(Xc, Yc, C, levels=levels, colors='k', linewidths=1.5)
+    if len(values_region) > 0:
+        levels = np.percentile(values_region, [50, 70, 90])
+        ax.contour(Xc, Yc, C, levels=levels, colors='k', linewidths=1.5)
 
     ax.set_xlim(left=min_sep)
     ax.set_ylim(bottom=min_sep)
@@ -708,8 +654,6 @@ def xi_sigmapi_package(ra_data, dec_data, chi_data,
     else:
         plt.show()
     plt.close(fig)
-
-    return xi, rp_bins
 
 # ---------------------------
 # Monopole functions
@@ -802,7 +746,9 @@ def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename
     ax.set_xlabel(r'$s\,[h^{-1}\mathrm{Mpc}]$')
     ax.set_ylabel(r'$s^{2}\xi_0(s)$')
     ax.set_title('Monopoles ξ₀(s)')
-    ax.axvline(102, color='k', linestyle=':', label='BAO scale')
+    # if s> 100, add vertical line for BAO scale
+    if np.any(monopoles_list[0][0] > 100):
+        ax.axvline(102, color='k', linestyle=':', label='BAO scale')
     ax.legend(loc='lower left')
     plt.tight_layout()
     
@@ -919,7 +865,7 @@ def main():
         dec_bin = master_dec[ptr:ptr + nrand_bin]
         ptr += nrand_bin
 
-        red_bin = generate_random_red(bin_df["red"].values, nrand_bin, ran_method,
+        red_bin = generate_random_red(cat_z_mag["red"].values, nrand_bin, ran_method,
                                       deg if ran_method == "poly" else None)
         rand_bin = pd.DataFrame({"ra": ra_bin, "dec": dec_bin, "red": red_bin})
         rand_bin["r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
@@ -928,8 +874,22 @@ def main():
         dec_weights = compute_dec_weights(bin_df["dec"].values, rand_bin["dec"].values,
                                           nbins=40, method="kde", alpha=1)
 
-        # Redshift homogenisation (assigns weights to both galaxies and randoms)
-        apply_redshift_weights_spline(bin_df, rand_bin, target_kde, dec_weights)
+        # --- Galaxy redshift weights (to homogenise bin galaxies to full sample) ---
+        z_bin = bin_df["red"].values
+        n_bins_z = 40
+        hist_bin, bin_edges = np.histogram(z_bin, bins=n_bins_z, density=False)
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        target_counts = target_kde(bin_centers) * len(z_bin) * (bin_edges[1] - bin_edges[0])
+        eps = 1e-10
+        ratio = (target_counts + eps) / (hist_bin + eps)
+        spline_ratio = UnivariateSpline(bin_centers, ratio, s=0.5, ext='const')
+        gal_weight_raw = spline_ratio(z_bin)
+        gal_weight_raw = np.clip(gal_weight_raw, 0.1, 10.0)
+        gal_weight = gal_weight_raw / np.mean(gal_weight_raw)
+        bin_df.loc[:, "weight"] = gal_weight
+
+        # --- Random weights: only declination weights (already normalised to mean 1) ---
+        rand_bin["weight"] = dec_weights
 
         randoms_bins_list.append(rand_bin)
 
@@ -950,9 +910,13 @@ def main():
         plot_radec_distribution(gxs, rxs, subsample=i)
 
     # ------------------------------------------------------------
-    # Compute ξ(σ, π) for full sample and each bin
+    # FIRST PASS: Compute ξ(σ, π) for full sample and each bin,
+    # store xi arrays and metadata.
     # ------------------------------------------------------------
-    print("\nComputing ξ(σ, π) for full sample...")
+    print("\nFirst pass: computing ξ(σ, π) for all samples...")
+
+    all_results = []   # will hold tuples: (xi, sigma_edges, max_pimax, pi_rebin, title, plotname)
+
     # Full sample
     params = {
         'sample': sample,
@@ -972,29 +936,24 @@ def main():
     }
     paircounts_file_full = get_paircounts_filename("full", params)
 
-    xi_sigma_pi_full, rp_bins = xi_sigmapi_package(
+    xi_full, rp_bins, max_pimax = compute_xi_sigmapi(
         cat_z_mag["ra"].values, cat_z_mag["dec"].values, cat_z_mag["r"].values,
         random_full["ra"].values, random_full["dec"].values, random_full["r"].values,
-        pi_rebin, title=rf"$\xi(\sigma, \pi)$ Full Sample",
+        pi_rebin,
         data_weights=None,
         rand_weights=random_full["weight"].values,
-        output_folder=output_folder,
-        plotname="xi_sigma_pi_full.png",
         min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
         paircounts_file=paircounts_file_full,
-        force_recompute=False   # set to True to override
+        force_recompute=force_recompute_full
     )
+    all_results.append( (xi_full, rp_bins, max_pimax, pi_rebin,
+                         rf"$\xi(\sigma, \pi)$ Full Sample", "xi_sigma_pi_full.png") )
 
-    monopoles_list = []
-
-    # Full sample
-    # Build π edges from the rebinned bin size
-    n_pi = xi_sigma_pi_full.shape[1]
-    pi_edges = np.arange(n_pi + 1) * pi_rebin          # step = pi_rebin
-    s_centers, xi0_full = compute_monopole(
-        xi_sigma_pi_full, rp_bins, pi_edges
-    )
-    monopoles_list.append((s_centers, xi0_full))
+    # Full sample monopole (unchanged)
+    n_pi = xi_full.shape[1]
+    pi_edges = np.arange(n_pi + 1) * pi_rebin
+    s_centers, xi0_full = compute_monopole(xi_full, rp_bins, pi_edges)
+    monopoles_list = [(s_centers, xi0_full)]
     labels_list = ['Full Sample']
 
     # Each dist_fil bin
@@ -1002,33 +961,56 @@ def main():
         params_bin = params.copy()
         paircounts_file_bin = get_paircounts_filename(f"bin{i}", params_bin)
 
-        xi_sigma_pi_bin, rp_bins_bin = xi_sigmapi_package(
+        xi_bin, rp_bins_bin, max_pimax_bin = compute_xi_sigmapi(
             gxs["ra"].values, gxs["dec"].values, gxs["r"].values,
             rxs["ra"].values, rxs["dec"].values, rxs["r"].values,
-            pi_rebin, title=rf"$\xi(\sigma, \pi)$ {lab}",
+            pi_rebin,
             data_weights=gxs["weight"].values,
             rand_weights=rxs["weight"].values,
-            output_folder=output_folder,
-            plotname=f"xi_sigma_pi_bin{i}.png",
             min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
             paircounts_file=paircounts_file_bin,
-            force_recompute=False
+            force_recompute=force_recompute_bin
         )
-        # Build π edges from the rebinned bin size
-        # Compute monopole for this bin
-        n_pi_bin = xi_sigma_pi_bin.shape[1]
-        pi_edges_bin = np.arange(n_pi_bin + 1) * pi_rebin
-        s_centers_bin, xi0_bin = compute_monopole(
-            xi_sigma_pi_bin, rp_bins_bin, pi_edges_bin
-        )
-        monopoles_list.append((s_centers_bin, xi0_bin))
-        labels_list.append(f"{lab}") #(mean={median_distfil[i]:.1f})")
+        all_results.append( (xi_bin, rp_bins_bin, max_pimax_bin, pi_rebin,
+                             rf"$\xi(\sigma, \pi)$ {lab}", f"xi_sigma_pi_bin{i}.png") )
 
-    # Plot all together
+        # Monopole for this bin
+        n_pi_bin = xi_bin.shape[1]
+        pi_edges_bin = np.arange(n_pi_bin + 1) * pi_rebin
+        s_centers_bin, xi0_bin = compute_monopole(xi_bin, rp_bins_bin, pi_edges_bin)
+        monopoles_list.append((s_centers_bin, xi0_bin))
+        labels_list.append(lab)
+
+    # ------------------------------------------------------------
+    # Determine global color limits from all xi arrays
+    # ------------------------------------------------------------
+    all_xi_flat = np.concatenate([xi.ravel() for xi, _, _, _, _, _ in all_results])
+    vmin_global = np.percentile(all_xi_flat, 1)
+    vmax_global = np.percentile(all_xi_flat, 99)
+    if vmin_global >= 0:
+        vmin_global = -vmax_global / 2
+    if vmax_global <= 0:
+        vmax_global = -vmin_global / 2
+    print(f"Global color limits: vmin={vmin_global:.3f}, vmax={vmax_global:.3f}")
+
+    # ------------------------------------------------------------
+    # SECOND PASS: Plot all samples with fixed color scale
+    # ------------------------------------------------------------
+    print("\nSecond pass: plotting with fixed color scale...")
+    for xi, sigma_edges, max_pimax, pi_rebin_val, title, plotname in all_results:
+        plot_xi_sigmapi(xi, sigma_edges, max_pimax, pi_rebin_val,
+                        title=title, output_folder=output_folder, plotname=plotname,
+                        min_sep=min_sep_2d,
+                        vmin_global=vmin_global, vmax_global=vmax_global)
+
+    # ------------------------------------------------------------
+    # Plot the combined monopoles (already computed)
+    # ------------------------------------------------------------
     plot_monopoles_combined(monopoles_list, labels_list,
                             output_folder=output_folder,
                             filename='xi0_combined.png')
 
     print("All done.")
+
 if __name__ == "__main__":
     main()
