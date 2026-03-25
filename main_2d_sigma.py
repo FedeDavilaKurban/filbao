@@ -22,14 +22,14 @@ from scipy.stats import gaussian_kde
 # ---------------------------
 
 force_recompute_full = False
-force_recompute_bin = False
+force_recompute_bin = True
 
 # ---- Sample ----------
 sample = 'nyu'
 test_dilute = 1                     # fraction of galaxies to keep (1.0 = full)
 sigma = 3.0
 h = 0.6774
-zmin, zmax = 0.07, 0.17
+zmin, zmax = 0.07, 0.2
 mag_max = -21.2
 ran_method = 'poly'           # ['random_choice', 'piecewise', 'poly']
 if ran_method == 'poly':
@@ -45,16 +45,20 @@ pi_rebin = 2                # rebin factor for π direction
 # ------ Σ₃ binning ------
 sigma3_bin_mode = "percentile_intervals"   # Options: "percentile", "equal_width", "fixed", "custom_intervals", "percentile_intervals"
 sigma3_bin_intervals = [   # used only for "custom_intervals"
-    (0, 2),   # 0–2 Mpc/h
-    (10, 50)  # 10–50 Mpc/h
+    (0, 4),   # 0–2 Mpc/h
+    (4, 50)  # 10–50 Mpc/h
 ]
 sigma3_bin_percentile_intervals = [   # used only for "percentile_intervals"
-    (0, 20),   # 0–20th percentile
-    (80, 100)
+    (0, 40),   # 0–20th percentile
+    (60, 100)
 ]
 nbins_sigma3 = 4             # used only for percentile / equal_width
 sigma3_bin_edges = [0, 2, 5, 10, 50]   # used only for "fixed"
 
+# ---- Filament subsampling (optional) ----
+do_fil_subsample = True          # Set to False to skip this
+dist_fil_fil_max = 2.0           # Mpc/h, galaxies with dist_fil < this are "filamentary"
+dist_fil_nonfil_min = 3.0        # Mpc/h, galaxies with dist_fil > this are "non‑filamentary"
 
 # ------ Random catalog parameters ------
 nside = 256
@@ -68,7 +72,10 @@ else:
     RADec_filepath = '../data/lss_randoms_combined_cut.csv'
 
 # ------ Output folder --------
-folderName = f'XISIGMAPI_z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}_Sigma3_{sigma3_bin_mode}'
+if do_fil_subsample:
+    folderName = f'XISIGMAPI_z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}_Sigma3_{sigma3_bin_mode}_fil{int(dist_fil_fil_max)}_nonfil{int(dist_fil_nonfil_min)}'
+else:
+    folderName = f'XISIGMAPI_z{zmin:.2f}-{zmax:.2f}_mag{mag_max:.1f}_gr{gr_min}_sigma{sigma}_nrand{nrand_mult}_RADECmethod{ran_radec_method}_Sigma3_{sigma3_bin_mode}'
 output_folder = f"../plots/{folderName}/"
 if os.path.exists(output_folder):
     shutil.rmtree(output_folder)
@@ -719,6 +726,7 @@ def plot_monopoles_combined(monopoles_list, labels, output_folder=None, filename
     colors = plt.cm.tab10.colors  # up to 10 colors
     for i, ((s, xi0), label) in enumerate(zip(monopoles_list, labels)):
         ax.plot(s, xi0*s**2, marker='o', linestyle='-', color=colors[i % len(colors)], label=label)
+        #ax.axvline(3, color=colors[i % len(colors)], linestyle='--', alpha=0.7, label='3Mpc/h')
     
     #ax.axhline(0, color='k', linestyle='--')
     ax.set_xlabel(r'$s\,[h^{-1}\mathrm{Mpc}]$')
@@ -772,7 +780,7 @@ def main():
     # Comoving distance
     cat_z_mag.loc[:, "r"] = cosmo.comoving_distance(cat_z_mag["red"].values).value * h
 
-    # ---------- Compute Σ₃ ----------
+    # Compute Σ₃
     from scipy.spatial import cKDTree
     positions = cat_z_mag[['x', 'y', 'z']].values
     tree = cKDTree(positions)
@@ -780,14 +788,46 @@ def main():
     distances, indices = tree.query(positions, k=nearest_neighbor_n + 1)
     cat_z_mag['sigma3'] = distances[:, nearest_neighbor_n - 1]
 
-    # ---------- Split into Σ₃ bins ----------
+    # Split into Σ₃ bins
     bins, labels = split_by_sigma3(cat_z_mag, column='sigma3')
 
+    # ---------- Build list of samples to process ----------
+    samples_to_process = []
 
-    # Plot K vs redshift (unchanged)
+    # 1. Full sample
+    samples_to_process.append((cat_z_mag, "Full Sample"))
+
+    # 2. Original sigma3 bins
+    for bin_df, label in zip(bins, labels):
+        samples_to_process.append((bin_df, label))
+    #samples_to_process.append((bins[0], labels[0]))
+
+    # 3. Filamentary / non‑filamentary subsamples
+    if do_fil_subsample:
+        # for bin_df, label in zip(bins, labels):
+        #     fil_mask = bin_df['dist_fil'] < dist_fil_fil_max
+        #     fil_df = bin_df[fil_mask].copy()
+        #     if len(fil_df) > 0:
+        #         samples_to_process.append((fil_df, f"{label} (filamentary, r_fil < {dist_fil_fil_max})"))
+
+        #     nonfil_mask = bin_df['dist_fil'] > dist_fil_nonfil_min
+        #     nonfil_df = bin_df[nonfil_mask].copy()
+        #     if len(nonfil_df) > 0:
+        #         samples_to_process.append((nonfil_df, f"{label} (non‑filamentary, r_fil > {dist_fil_nonfil_min})"))
+        fil_mask = bins[0]['dist_fil'] < dist_fil_fil_max
+        fil_df = bins[0][fil_mask].copy()
+        if len(fil_df) > 0:
+            samples_to_process.append((fil_df, f"{labels[0]} (filamentary, r_fil < {dist_fil_fil_max})"))
+
+        nonfil_mask = bins[0]['dist_fil'] > dist_fil_nonfil_min
+        nonfil_df = bins[0][nonfil_mask].copy()
+        if len(nonfil_df) > 0:
+            samples_to_process.append((nonfil_df, f"{labels[0]} (non‑filamentary, r_fil > {dist_fil_nonfil_min})"))
+
+    # Plot redshift-magnitude (unchanged)
     plot_redshift_k(cat_z)
 
-    # Preload RA/Dec if method='file' (unchanged)
+    # Preload RA/Dec if method='file'
     if ran_radec_method == 'file':
         print("Reading RA/Dec file...")
         radec_data = pd.read_csv(RADec_filepath)
@@ -800,9 +840,8 @@ def main():
     # ------------------------------------------------------------
     # Compute required random counts and generate master RA/Dec
     # ------------------------------------------------------------
-    nrand_full = nrand_mult * len(cat_z_mag)                     # for full sample
-    nrand_bins = [nrand_mult * len(b) for b in bins]             # for each bin
-    total_rand = nrand_full + sum(nrand_bins)                    # total needed
+    nrand_per_sample = [nrand_mult * len(df) for df, _ in samples_to_process]
+    total_rand = sum(nrand_per_sample)
 
     if ran_radec_method == 'file':
         print(f"Main sample size: {len(cat_z_mag)}")
@@ -821,86 +860,78 @@ def main():
     )
     print("Master array generated.")
 
-    # --- Full sample random catalog (first slice) ---
-    ra_rand_full = master_ra[:nrand_full]
-    dec_rand_full = master_dec[:nrand_full]
-    ptr = nrand_full   # pointer for next slice
-
-    red_full = generate_random_red(cat_z_mag["red"].values, nrand_full, ran_method,
-                                   deg if ran_method == "poly" else None)
-    random_full = pd.DataFrame({"ra": ra_rand_full, "dec": dec_rand_full, "red": red_full})
-    random_full["r"] = cosmo.comoving_distance(random_full["red"].values).value * h
-
-    # Declination weights for full sample
-    rand_weights_full = compute_dec_weights(cat_z_mag["dec"].values, random_full["dec"].values,
-                                            nbins=40, method="kde", alpha=1)
-    random_full["weight"] = rand_weights_full
-
     # Target redshift KDE from full sample (used for homogenisation)
     target_kde = gaussian_kde(cat_z_mag["red"].values)
     target_kde.set_bandwidth(target_kde.factor * 1.2)
 
-    # --- Generate random catalogs for each bin (next slices) ---
-    randoms_bins_list = []
-    for i, bin_df in enumerate(bins):
-        nrand_bin = nrand_bins[i]
-        ra_bin = master_ra[ptr:ptr + nrand_bin]
-        dec_bin = master_dec[ptr:ptr + nrand_bin]
-        ptr += nrand_bin
+    # Generate random catalogs for each sample
+    random_catalogs = []
+    ptr = 0
+    for (df, label), nrand in zip(samples_to_process, nrand_per_sample):
+        ra = master_ra[ptr:ptr + nrand]
+        dec = master_dec[ptr:ptr + nrand]
+        ptr += nrand
 
-        red_bin = generate_random_red(cat_z_mag["red"].values, nrand_bin, ran_method,
-                                      deg if ran_method == "poly" else None)
-        rand_bin = pd.DataFrame({"ra": ra_bin, "dec": dec_bin, "red": red_bin})
-        rand_bin["r"] = cosmo.comoving_distance(rand_bin["red"].values).value * h
+        red = generate_random_red(cat_z_mag["red"].values, nrand, ran_method,
+                                  deg if ran_method == "poly" else None)
+        rand = pd.DataFrame({"ra": ra, "dec": dec, "red": red})
+        rand["r"] = cosmo.comoving_distance(rand["red"].values).value * h
 
         # Declination weights
-        dec_weights = compute_dec_weights(bin_df["dec"].values, rand_bin["dec"].values,
+        dec_weights = compute_dec_weights(df["dec"].values, rand["dec"].values,
                                           nbins=40, method="kde", alpha=1)
+        rand["weight"] = dec_weights
 
-        # --- Galaxy redshift weights (to homogenise bin galaxies to full sample) ---
-        z_bin = bin_df["red"].values
-        n_bins_z = 40
-        hist_bin, bin_edges = np.histogram(z_bin, bins=n_bins_z, density=False)
-        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        target_counts = target_kde(bin_centers) * len(z_bin) * (bin_edges[1] - bin_edges[0])
-        eps = 1e-10
-        ratio = (target_counts + eps) / (hist_bin + eps)
-        spline_ratio = UnivariateSpline(bin_centers, ratio, s=0.5, ext='const')
-        gal_weight_raw = spline_ratio(z_bin)
-        gal_weight_raw = np.clip(gal_weight_raw, 0.1, 10.0)
-        gal_weight = gal_weight_raw / np.mean(gal_weight_raw)
-        bin_df.loc[:, "weight"] = gal_weight
+        # Galaxy redshift weights (except for the full sample)
+        if label != "Full Sample":
+            z_bin = df["red"].values
+            n_bins_z = 40
+            hist_bin, bin_edges = np.histogram(z_bin, bins=n_bins_z, density=False)
+            bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+            target_counts = target_kde(bin_centers) * len(z_bin) * (bin_edges[1] - bin_edges[0])
+            eps = 1e-10
+            ratio = (target_counts + eps) / (hist_bin + eps)
+            spline_ratio = UnivariateSpline(bin_centers, ratio, s=0.5, ext='const')
+            gal_weight_raw = spline_ratio(z_bin)
+            gal_weight_raw = np.clip(gal_weight_raw, 0.1, 10.0)
+            gal_weight = gal_weight_raw / np.mean(gal_weight_raw)
+            df.loc[:, "weight"] = gal_weight
+        else:
+            # For the full sample, no redshift weights (or set to 1)
+            if "weight" not in df.columns:
+                df["weight"] = 1.0
 
-        # --- Random weights: only declination weights (already normalised to mean 1) ---
-        rand_bin["weight"] = dec_weights
+        random_catalogs.append(rand)
 
-        randoms_bins_list.append(rand_bin)
-
-    # Print length of data and random catalogs for verification
-    print(f"\nFull sample: {len(cat_z_mag)} galaxies, {len(random_full)} randoms")
-    for i, (bin_df, rand_bin) in enumerate(zip(bins, randoms_bins_list)):
-        print(f"Bin {i}: {len(bin_df)} galaxies, {len(rand_bin)} randoms")
+    # Diagnostic prints
+    print("\nSamples and random counts:")
+    for (df, label), rand in zip(samples_to_process, random_catalogs):
+        print(f"{label}: {len(df)} galaxies, {len(rand)} randoms")
 
     # ------------------------------------------------------------
-    # Diagnostic plots (unchanged)
+    # Diagnostic plots
     # ------------------------------------------------------------
-    plot_radec_distribution(cat_z_mag, random_full)
-    plot_bin_data_and_randoms(cat_z_mag, random_full, label="Full Sample",
+    # Full sample (first element) already plotted as "Full Sample"
+    plot_radec_distribution(cat_z_mag, random_catalogs[0])
+    plot_bin_data_and_randoms(cat_z_mag, random_catalogs[0], label="Full Sample",
                               plotname=f"../plots/{folderName}/bin_full_data_randoms.png")
-    for i, (gxs, rxs, lab) in enumerate(zip(bins, randoms_bins_list, labels)):
-        plot_bin_data_and_randoms(gxs, rxs, label=lab,
-                                  plotname=f"../plots/{folderName}/bin_{i}_data_randoms.png")
-        plot_radec_distribution(gxs, rxs, subsample=i)
+
+    for i, ((df, label), rand) in enumerate(zip(samples_to_process, random_catalogs)):
+        if i == 0: continue   # already plotted full sample above
+        plot_bin_data_and_randoms(df, rand, label=label,
+                                  plotname=f"../plots/{folderName}/sample_{i}_data_randoms.png")
+        plot_radec_distribution(df, rand, subsample=i)
 
     # ------------------------------------------------------------
-    # FIRST PASS: Compute ξ(σ, π) for full sample and each bin,
-    # store xi arrays and metadata.
+    # Compute ξ(σ, π) for all samples
     # ------------------------------------------------------------
-    print("\nFirst pass: computing ξ(σ, π) for all samples...")
+    print("\nComputing ξ(σ, π) for all samples...")
 
-    all_results = []   # will hold tuples: (xi, sigma_edges, max_pimax, pi_rebin, title, plotname)
+    all_results = []          # (xi, sigma_edges, max_pimax, pi_rebin, title, plotname)
+    monopoles_list = []       # (s_centers, xi0)
+    labels_list = []
 
-    # Full sample
+    # Parameters for pair count filenames (common for all)
     params = {
         'sample': sample,
         'h': h,
@@ -914,55 +945,33 @@ def main():
         'pi_rebin': pi_rebin,
         'nrand_mult': nrand_mult,
         'ran_radec_method': ran_radec_method,
-        'dist_bin_mode': 'sigma3_subsample'   # we set a dummy value; it won't affect filenames
+        'dist_bin_mode': 'sigma3_subsample'
     }
-    paircounts_file_full = get_paircounts_filename("full", params)
 
-    xi_full, rp_bins, max_pimax = compute_xi_sigmapi(
-        cat_z_mag["ra"].values, cat_z_mag["dec"].values, cat_z_mag["r"].values,
-        random_full["ra"].values, random_full["dec"].values, random_full["r"].values,
-        pi_rebin,
-        data_weights=None,
-        rand_weights=random_full["weight"].values,
-        min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
-        paircounts_file=paircounts_file_full,
-        force_recompute=force_recompute_full
-    )
-    all_results.append( (xi_full, rp_bins, max_pimax, pi_rebin,
-                         rf"$\xi(\sigma, \pi)$ Full Sample", "xi_sigma_pi_full.png") )
+    for idx, ((df, label), rand) in enumerate(zip(samples_to_process, random_catalogs)):
+        print(f"Processing: {label}")
+        paircounts_file = get_paircounts_filename(f"sample_{idx}", params)
 
-    # Full sample monopole
-    n_pi = xi_full.shape[1]
-    pi_edges = np.arange(n_pi + 1) * pi_rebin
-    s_centers, xi0_full = compute_monopole(xi_full, rp_bins, pi_edges)
-    monopoles_list = [(s_centers, xi0_full)]
-    labels_list = ['Full Sample']
-
-    # Each sigma₃ bin (only one)
-    for i, (gxs, rxs, lab) in enumerate(zip(bins, randoms_bins_list, labels)):
-        params_bin = params.copy()
-        # Use a distinct bin name to avoid file collisions
-        paircounts_file_bin = get_paircounts_filename(f"sigma3_bin{i}", params_bin)
-
-        xi_bin, rp_bins_bin, max_pimax_bin = compute_xi_sigmapi(
-            gxs["ra"].values, gxs["dec"].values, gxs["r"].values,
-            rxs["ra"].values, rxs["dec"].values, rxs["r"].values,
+        xi, rp_bins, max_pimax = compute_xi_sigmapi(
+            df["ra"].values, df["dec"].values, df["r"].values,
+            rand["ra"].values, rand["dec"].values, rand["r"].values,
             pi_rebin,
-            data_weights=gxs["weight"].values,
-            rand_weights=rxs["weight"].values,
+            data_weights=df["weight"].values if "weight" in df else None,
+            rand_weights=rand["weight"].values,
             min_sep=min_sep_2d, max_sep=max_sep_2d, bin_size=bin_size_2d,
-            paircounts_file=paircounts_file_bin,
-            force_recompute=force_recompute_bin
+            paircounts_file=paircounts_file,
+            force_recompute=force_recompute_full if idx == 0 else force_recompute_bin
         )
-        all_results.append( (xi_bin, rp_bins_bin, max_pimax_bin, pi_rebin,
-                             rf"$\xi(\sigma, \pi)$ {lab}", f"xi_sigma_pi_sigma3_{i}.png") )
+        all_results.append((xi, rp_bins, max_pimax, pi_rebin,
+                            rf"$\xi(\sigma, \pi)$ {label}",
+                            f"xi_sigma_pi_sample_{idx}.png"))
 
-        # Monopole for this bin
-        n_pi_bin = xi_bin.shape[1]
-        pi_edges_bin = np.arange(n_pi_bin + 1) * pi_rebin
-        s_centers_bin, xi0_bin = compute_monopole(xi_bin, rp_bins_bin, pi_edges_bin)
-        monopoles_list.append((s_centers_bin, xi0_bin))
-        labels_list.append(lab)
+        # Monopole
+        n_pi = xi.shape[1]
+        pi_edges = np.arange(n_pi + 1) * pi_rebin
+        s_centers, xi0 = compute_monopole(xi, rp_bins, pi_edges)
+        monopoles_list.append((s_centers, xi0))
+        labels_list.append(label)
 
     # ------------------------------------------------------------
     # Determine global color limits from all xi arrays
@@ -977,9 +986,9 @@ def main():
     print(f"Global color limits: vmin={vmin_global:.3f}, vmax={vmax_global:.3f}")
 
     # ------------------------------------------------------------
-    # SECOND PASS: Plot all samples with fixed color scale
+    # Plot all 2D correlation functions with fixed color scale
     # ------------------------------------------------------------
-    print("\nSecond pass: plotting with fixed color scale...")
+    print("\nPlotting ξ(σ, π) with fixed color scale...")
     for xi, sigma_edges, max_pimax, pi_rebin_val, title, plotname in all_results:
         plot_xi_sigmapi(xi, sigma_edges, max_pimax, pi_rebin_val,
                         title=title, output_folder=output_folder, plotname=plotname,
@@ -987,7 +996,7 @@ def main():
                         vmin_global=vmin_global, vmax_global=vmax_global)
 
     # ------------------------------------------------------------
-    # Plot the combined monopoles (already computed)
+    # Combined monopole plot
     # ------------------------------------------------------------
     plot_monopoles_combined(monopoles_list, labels_list,
                             output_folder=output_folder,
